@@ -163,6 +163,12 @@ static const GUID MY_IID_IMFMediaSource = {
     {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}
 };
 
+// MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = {FB394F3D-CCF0-42B5-B722-435EC513CC9E}
+static const GUID MY_MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = {
+    0xfb394f3d, 0xccf0, 0x42b5,
+    {0xb7, 0x22, 0x43, 0x5e, 0xc5, 0x13, 0xcc, 0x9e}
+};
+
 // ============================================================================
 // Capture State
 // ============================================================================
@@ -568,13 +574,23 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     }
     LOG("capture_thread: ActivateObject ok, pSource=%p\n", pSource);
 
-    // Create source reader
-    hr = MFCreateSourceReaderFromMediaSource(pSource, NULL, &pReader);
+    // Create source reader with video processing enabled
+    // This allows MF to convert from camera native format (NV12/YUY2) to RGB24/RGB32
+    IMFAttributes* pReaderAttrs = NULL;
+    hr = MFCreateAttributes(&pReaderAttrs, 1);
+    if (SUCCEEDED(hr)) {
+        pReaderAttrs->lpVtbl->SetUINT32(pReaderAttrs,
+            &MY_MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+        LOG("capture_thread: Video processing enabled\n", 0);
+    }
+
+    hr = MFCreateSourceReaderFromMediaSource(pSource, pReaderAttrs, &pReader);
+    if (pReaderAttrs) pReaderAttrs->lpVtbl->Release(pReaderAttrs);
     if (FAILED(hr)) {
         LOG("capture_thread: MFCreateSourceReaderFromMediaSource failed: 0x%08X\n", hr);
         goto exit;
     }
-    LOG("capture_thread: SourceReader created ok\n", 0);
+    LOG("capture_thread: SourceReader created ok (with video processing)\n", 0);
 
     // Configure output format: request RGB24 (MF will auto-convert from camera native format)
     // IMPORTANT: Only set major type + subtype. Do NOT set frame size or frame rate here.
