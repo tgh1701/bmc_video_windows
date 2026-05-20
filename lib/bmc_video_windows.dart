@@ -123,6 +123,39 @@ void disposeFrameBuffer() {
 }
 
 // ============================================================================
+// Debug Logging
+// ============================================================================
+
+/// Get path to native debug log file.
+String getLogFilePath() {
+  final ptr = _dylib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>('getLogFilePath')();
+  return ptr.toDartString();
+}
+
+/// Read native debug log contents.
+/// Returns the full log file contents as a string.
+String getNativeLog() {
+  try {
+    final path = getLogFilePath();
+    final file = File(path);
+    if (file.existsSync()) {
+      return file.readAsStringSync();
+    }
+    return '(log file not found: $path)';
+  } catch (e) {
+    return '(error reading log: $e)';
+  }
+}
+
+/// Print native debug log to stdout (for Flutter console).
+void printNativeLog() {
+  final log = getNativeLog();
+  print('=== bmc_video_windows native log ===');
+  print(log);
+  print('=== end native log ===');
+}
+
+// ============================================================================
 // Native Library Loading
 // ============================================================================
 

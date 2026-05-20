@@ -77,4 +77,8 @@ int getFrameWidth(void);
 FFI_PLUGIN_EXPORT
 int getFrameHeight(void);
 
+/// Get path to the native debug log file.
+FFI_PLUGIN_EXPORT
+const char* getLogFilePath(void);
+
 #endif // BMC_VIDEO_WINDOWS_H
