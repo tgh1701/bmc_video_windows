@@ -576,7 +576,9 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     }
     LOG("capture_thread: SourceReader created ok\n", 0);
 
-    // Configure output format: request RGB24 (MF will auto-convert)
+    // Configure output format: request RGB24 (MF will auto-convert from camera native format)
+    // IMPORTANT: Only set major type + subtype. Do NOT set frame size or frame rate here.
+    // Setting those causes MF_E_INVALIDMEDIATYPE when the camera native format differs.
     hr = MFCreateMediaType(&pOutputType);
     if (FAILED(hr)) {
         LOG("capture_thread: MFCreateMediaType failed: 0x%08X\n", hr);
@@ -585,18 +587,6 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
 
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB24);
-
-    // Set requested resolution
-    {
-        UINT64 frameSize = ((UINT64)state->width << 32) | (UINT64)state->height;
-        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_SIZE, frameSize);
-    }
-
-    // Set requested frame rate
-    {
-        UINT64 frameRate = ((UINT64)state->fps << 32) | 1ULL;
-        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_RATE, frameRate);
-    }
 
     hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
         MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
