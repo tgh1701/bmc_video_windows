@@ -592,37 +592,81 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     }
     LOG("capture_thread: SourceReader created ok (with video processing)\n", 0);
 
-    // Configure output format: request RGB24 (MF will auto-convert from camera native format)
-    // IMPORTANT: Only set major type + subtype. Do NOT set frame size or frame rate here.
-    // Setting those causes MF_E_INVALIDMEDIATYPE when the camera native format differs.
+    // ========================================================================
+    // Step 1: Get native media type to understand camera's format
+    // ========================================================================
+    IMFMediaType* pNativeType = NULL;
+    hr = pReader->lpVtbl->GetNativeMediaType(pReader,
+        MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &pNativeType);
+    if (FAILED(hr)) {
+        LOG("capture_thread: GetNativeMediaType failed: 0x%08X\n", hr);
+        goto exit;
+    }
+
+    // Log native format details
+    {
+        GUID nativeSubtype = {0};
+        pNativeType->lpVtbl->GetGUID(pNativeType, &MY_MF_MT_SUBTYPE, &nativeSubtype);
+        LOG("capture_thread: Native subtype: %08X-%04X-%04X\n",
+            nativeSubtype.Data1, nativeSubtype.Data2, nativeSubtype.Data3);
+
+        UINT64 nativeFrameSize = 0;
+        pNativeType->lpVtbl->GetUINT64(pNativeType, &MY_MF_MT_FRAME_SIZE, &nativeFrameSize);
+        int nw = (int)(nativeFrameSize >> 32);
+        int nh = (int)(nativeFrameSize & 0xFFFFFFFF);
+        LOG("capture_thread: Native resolution: %dx%d\n", nw, nh);
+    }
+
+    // ========================================================================
+    // Step 2: Try to set output format to RGB32 (copy native type, change subtype)
+    // ========================================================================
+    int useNativeFormat = 0;  // 0 = RGB output, 1 = native NV12/YUY2
+
+    // Method: Copy all attributes from native type, just change subtype
     hr = MFCreateMediaType(&pOutputType);
     if (FAILED(hr)) {
         LOG("capture_thread: MFCreateMediaType failed: 0x%08X\n", hr);
         goto exit;
     }
 
-    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
-    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB24);
+    // Copy all attributes from native type
+    pNativeType->lpVtbl->CopyAllItems(pNativeType, (IMFAttributes*)pOutputType);
 
+    // Try RGB32 first (MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING supports YUV→RGB32)
+    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
     hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
         MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
-    if (FAILED(hr)) {
-        LOG("capture_thread: SetCurrentMediaType RGB24 failed: 0x%08X, trying RGB32...\n", hr);
+    if (SUCCEEDED(hr)) {
+        LOG("capture_thread: Using RGB32 output (converted from native)\n", 0);
+    } else {
+        LOG("capture_thread: RGB32 failed: 0x%08X, trying RGB24...\n", hr);
 
-        // Fallback: try RGB32
-        pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
+        // Try RGB24
+        pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB24);
         hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
             MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
-        if (FAILED(hr)) {
-            LOG("capture_thread: SetCurrentMediaType RGB32 also failed: 0x%08X\n", hr);
-            goto exit;
+        if (SUCCEEDED(hr)) {
+            LOG("capture_thread: Using RGB24 output (converted from native)\n", 0);
+        } else {
+            LOG("capture_thread: RGB24 also failed: 0x%08X, using native format\n", hr);
+            useNativeFormat = 1;
+
+            // Reset to native format
+            hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
+                MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pNativeType);
+            if (FAILED(hr)) {
+                LOG("capture_thread: Setting native type also failed: 0x%08X\n", hr);
+                goto exit;
+            }
+            LOG("capture_thread: Using native format (will convert manually)\n", 0);
         }
-        LOG("capture_thread: Using RGB32 format\n", 0);
-    } else {
-        LOG("capture_thread: Using RGB24 format\n", 0);
     }
 
-    // Read back actual media type to get real resolution
+    if (pNativeType) { pNativeType->lpVtbl->Release(pNativeType); pNativeType = NULL; }
+
+    // ========================================================================
+    // Step 3: Read actual resolution from current media type
+    // ========================================================================
     {
         IMFMediaType* pActualType = NULL;
         hr = pReader->lpVtbl->GetCurrentMediaType(pReader,
@@ -634,6 +678,13 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                 actualWidth = (int)(frameSize >> 32);
                 actualHeight = (int)(frameSize & 0xFFFFFFFF);
             }
+
+            // Get actual subtype for logging
+            GUID actualSubtype = {0};
+            pActualType->lpVtbl->GetGUID(pActualType, &MY_MF_MT_SUBTYPE, &actualSubtype);
+            LOG("capture_thread: Actual subtype: %08X, resolution: %dx%d\n",
+                actualSubtype.Data1, actualWidth, actualHeight);
+
             pActualType->lpVtbl->Release(pActualType);
         }
     }
@@ -641,10 +692,22 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     state->width = actualWidth;
     state->height = actualHeight;
 
-    LOG("capture_thread: CAPTURE LOOP STARTING: %dx%d @ %dfps, quality=%d\n",
-        actualWidth, actualHeight, state->fps, state->jpegQuality);
+    // Allocate RGB conversion buffer if using native format
+    uint8_t* rgbBuffer = NULL;
+    if (useNativeFormat) {
+        rgbBuffer = (uint8_t*)malloc(actualWidth * actualHeight * 3);
+        if (!rgbBuffer) {
+            LOG("capture_thread: Failed to allocate RGB conversion buffer\n", 0);
+            goto exit;
+        }
+    }
 
-    // Capture loop
+    LOG("capture_thread: CAPTURE LOOP STARTING: %dx%d, quality=%d, nativeConvert=%d\n",
+        actualWidth, actualHeight, state->jpegQuality, useNativeFormat);
+
+    // ========================================================================
+    // Step 4: Capture loop
+    // ========================================================================
     int frameCount = 0;
     while (state->running) {
         DWORD streamIndex = 0;
@@ -676,9 +739,103 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                 DWORD maxLen = 0, curLen = 0;
                 hr = pBuffer->lpVtbl->Lock(pBuffer, &pBits, &maxLen, &curLen);
                 if (SUCCEEDED(hr) && pBits && curLen > 0) {
+                    BYTE* rgbData = pBits;
+                    int rgbWidth = actualWidth;
+                    int rgbHeight = actualHeight;
+
+                    // If native format, convert NV12/YUY2 to RGB24
+                    if (useNativeFormat && rgbBuffer) {
+                        // Try NV12 first (most common for webcams)
+                        // NV12: Y plane (w*h bytes) + UV interleaved plane (w*h/2 bytes)
+                        DWORD expectedNV12 = (DWORD)(rgbWidth * rgbHeight * 3 / 2);
+                        DWORD expectedYUY2 = (DWORD)(rgbWidth * rgbHeight * 2);
+
+                        if (curLen >= expectedNV12) {
+                            // NV12 to RGB24 conversion
+                            const uint8_t* yPlane = pBits;
+                            const uint8_t* uvPlane = pBits + rgbWidth * rgbHeight;
+
+                            for (int y = 0; y < rgbHeight; y++) {
+                                for (int x = 0; x < rgbWidth; x++) {
+                                    int yIdx = y * rgbWidth + x;
+                                    int uvIdx = (y / 2) * rgbWidth + (x & ~1);
+
+                                    int Y = yPlane[yIdx];
+                                    int U = uvPlane[uvIdx] - 128;
+                                    int V = uvPlane[uvIdx + 1] - 128;
+
+                                    int R = Y + ((359 * V) >> 8);
+                                    int G = Y - ((88 * U + 183 * V) >> 8);
+                                    int B = Y + ((454 * U) >> 8);
+
+                                    // Clamp
+                                    if (R < 0) R = 0; if (R > 255) R = 255;
+                                    if (G < 0) G = 0; if (G > 255) G = 255;
+                                    if (B < 0) B = 0; if (B > 255) B = 255;
+
+                                    // BGR order for WIC
+                                    int outIdx = (y * rgbWidth + x) * 3;
+                                    rgbBuffer[outIdx + 0] = (uint8_t)B;
+                                    rgbBuffer[outIdx + 1] = (uint8_t)G;
+                                    rgbBuffer[outIdx + 2] = (uint8_t)R;
+                                }
+                            }
+                            rgbData = rgbBuffer;
+                            if (frameCount == 0) {
+                                LOG("capture_thread: NV12 conversion used (curLen=%u, expected=%u)\n", curLen, expectedNV12);
+                            }
+                        } else if (curLen >= expectedYUY2) {
+                            // YUY2 to RGB24 conversion
+                            // YUY2: [Y0 U0 Y1 V0] [Y2 U1 Y3 V1] ...
+                            for (int y = 0; y < rgbHeight; y++) {
+                                for (int x = 0; x < rgbWidth; x += 2) {
+                                    int srcIdx = (y * rgbWidth + x) * 2;
+                                    int Y0 = pBits[srcIdx];
+                                    int U  = pBits[srcIdx + 1] - 128;
+                                    int Y1 = pBits[srcIdx + 2];
+                                    int V  = pBits[srcIdx + 3] - 128;
+
+                                    // Pixel 0
+                                    int R = Y0 + ((359 * V) >> 8);
+                                    int G = Y0 - ((88 * U + 183 * V) >> 8);
+                                    int B = Y0 + ((454 * U) >> 8);
+                                    if (R < 0) R = 0; if (R > 255) R = 255;
+                                    if (G < 0) G = 0; if (G > 255) G = 255;
+                                    if (B < 0) B = 0; if (B > 255) B = 255;
+
+                                    int outIdx = (y * rgbWidth + x) * 3;
+                                    rgbBuffer[outIdx + 0] = (uint8_t)B;
+                                    rgbBuffer[outIdx + 1] = (uint8_t)G;
+                                    rgbBuffer[outIdx + 2] = (uint8_t)R;
+
+                                    // Pixel 1
+                                    R = Y1 + ((359 * V) >> 8);
+                                    G = Y1 - ((88 * U + 183 * V) >> 8);
+                                    B = Y1 + ((454 * U) >> 8);
+                                    if (R < 0) R = 0; if (R > 255) R = 255;
+                                    if (G < 0) G = 0; if (G > 255) G = 255;
+                                    if (B < 0) B = 0; if (B > 255) B = 255;
+
+                                    rgbBuffer[outIdx + 3] = (uint8_t)B;
+                                    rgbBuffer[outIdx + 4] = (uint8_t)G;
+                                    rgbBuffer[outIdx + 5] = (uint8_t)R;
+                                }
+                            }
+                            rgbData = rgbBuffer;
+                            if (frameCount == 0) {
+                                LOG("capture_thread: YUY2 conversion used (curLen=%u, expected=%u)\n", curLen, expectedYUY2);
+                            }
+                        } else {
+                            if (frameCount == 0) {
+                                LOG("capture_thread: Unknown native size: curLen=%u (nv12=%u, yuy2=%u)\n",
+                                    curLen, expectedNV12, expectedYUY2);
+                            }
+                        }
+                    }
+
                     // Encode to JPEG
                     int jpegLen = encode_rgb_to_jpeg(
-                        pBits, actualWidth, actualHeight,
+                        rgbData, rgbWidth, rgbHeight,
                         state->jpegQuality, tempJpeg, jpegBufSize);
 
                     if (jpegLen > 0) {
@@ -692,7 +849,6 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                         // Copy to shared buffer
                         WaitForSingleObject(state->frameMutex, INFINITE);
                         if (state->jpegBuffer == NULL || jpegLen > jpegBufSize) {
-                            // Reallocate if needed
                             free(state->jpegBuffer);
                             state->jpegBuffer = (uint8_t*)malloc(jpegBufSize);
                         }
@@ -715,6 +871,8 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
             pSample->lpVtbl->Release(pSample);
         }
     }
+
+    free(rgbBuffer);
 
     LOG("capture_thread: loop ended, total frames=%d\n", frameCount);
 
