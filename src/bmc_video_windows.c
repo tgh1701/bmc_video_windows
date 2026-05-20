@@ -743,51 +743,16 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                     int rgbWidth = actualWidth;
                     int rgbHeight = actualHeight;
 
-                    // If native format, convert NV12/YUY2 to RGB24
+                    // If native format, convert YUY2/NV12 to RGB24 (flipped vertically for WIC)
                     if (useNativeFormat && rgbBuffer) {
-                        // Try NV12 first (most common for webcams)
-                        // NV12: Y plane (w*h bytes) + UV interleaved plane (w*h/2 bytes)
-                        DWORD expectedNV12 = (DWORD)(rgbWidth * rgbHeight * 3 / 2);
                         DWORD expectedYUY2 = (DWORD)(rgbWidth * rgbHeight * 2);
+                        DWORD expectedNV12 = (DWORD)(rgbWidth * rgbHeight * 3 / 2);
 
-                        if (curLen >= expectedNV12) {
-                            // NV12 to RGB24 conversion
-                            const uint8_t* yPlane = pBits;
-                            const uint8_t* uvPlane = pBits + rgbWidth * rgbHeight;
-
+                        // Check YUY2 first (curLen == w*h*2 = 614400 for 640x480)
+                        if (curLen >= expectedYUY2) {
+                            // YUY2 to RGB24 conversion (flip vertical)
                             for (int y = 0; y < rgbHeight; y++) {
-                                for (int x = 0; x < rgbWidth; x++) {
-                                    int yIdx = y * rgbWidth + x;
-                                    int uvIdx = (y / 2) * rgbWidth + (x & ~1);
-
-                                    int Y = yPlane[yIdx];
-                                    int U = uvPlane[uvIdx] - 128;
-                                    int V = uvPlane[uvIdx + 1] - 128;
-
-                                    int R = Y + ((359 * V) >> 8);
-                                    int G = Y - ((88 * U + 183 * V) >> 8);
-                                    int B = Y + ((454 * U) >> 8);
-
-                                    // Clamp
-                                    if (R < 0) R = 0; if (R > 255) R = 255;
-                                    if (G < 0) G = 0; if (G > 255) G = 255;
-                                    if (B < 0) B = 0; if (B > 255) B = 255;
-
-                                    // BGR order for WIC
-                                    int outIdx = (y * rgbWidth + x) * 3;
-                                    rgbBuffer[outIdx + 0] = (uint8_t)B;
-                                    rgbBuffer[outIdx + 1] = (uint8_t)G;
-                                    rgbBuffer[outIdx + 2] = (uint8_t)R;
-                                }
-                            }
-                            rgbData = rgbBuffer;
-                            if (frameCount == 0) {
-                                LOG("capture_thread: NV12 conversion used (curLen=%u, expected=%u)\n", curLen, expectedNV12);
-                            }
-                        } else if (curLen >= expectedYUY2) {
-                            // YUY2 to RGB24 conversion
-                            // YUY2: [Y0 U0 Y1 V0] [Y2 U1 Y3 V1] ...
-                            for (int y = 0; y < rgbHeight; y++) {
+                                int outY = rgbHeight - 1 - y;  // flip
                                 for (int x = 0; x < rgbWidth; x += 2) {
                                     int srcIdx = (y * rgbWidth + x) * 2;
                                     int Y0 = pBits[srcIdx];
@@ -795,7 +760,6 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                     int Y1 = pBits[srcIdx + 2];
                                     int V  = pBits[srcIdx + 3] - 128;
 
-                                    // Pixel 0
                                     int R = Y0 + ((359 * V) >> 8);
                                     int G = Y0 - ((88 * U + 183 * V) >> 8);
                                     int B = Y0 + ((454 * U) >> 8);
@@ -803,12 +767,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                     if (G < 0) G = 0; if (G > 255) G = 255;
                                     if (B < 0) B = 0; if (B > 255) B = 255;
 
-                                    int outIdx = (y * rgbWidth + x) * 3;
+                                    int outIdx = (outY * rgbWidth + x) * 3;
                                     rgbBuffer[outIdx + 0] = (uint8_t)B;
                                     rgbBuffer[outIdx + 1] = (uint8_t)G;
                                     rgbBuffer[outIdx + 2] = (uint8_t)R;
 
-                                    // Pixel 1
                                     R = Y1 + ((359 * V) >> 8);
                                     G = Y1 - ((88 * U + 183 * V) >> 8);
                                     B = Y1 + ((454 * U) >> 8);
@@ -823,7 +786,40 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                             }
                             rgbData = rgbBuffer;
                             if (frameCount == 0) {
-                                LOG("capture_thread: YUY2 conversion used (curLen=%u, expected=%u)\n", curLen, expectedYUY2);
+                                LOG("capture_thread: YUY2 conversion (curLen=%u)\n", curLen);
+                            }
+                        } else if (curLen >= expectedNV12) {
+                            // NV12 to RGB24 conversion (flip vertical)
+                            const uint8_t* yPlane = pBits;
+                            const uint8_t* uvPlane = pBits + rgbWidth * rgbHeight;
+
+                            for (int y = 0; y < rgbHeight; y++) {
+                                int outY = rgbHeight - 1 - y;  // flip
+                                for (int x = 0; x < rgbWidth; x++) {
+                                    int yIdx = y * rgbWidth + x;
+                                    int uvIdx = (y / 2) * rgbWidth + (x & ~1);
+
+                                    int Y = yPlane[yIdx];
+                                    int U = uvPlane[uvIdx] - 128;
+                                    int V = uvPlane[uvIdx + 1] - 128;
+
+                                    int R = Y + ((359 * V) >> 8);
+                                    int G = Y - ((88 * U + 183 * V) >> 8);
+                                    int B = Y + ((454 * U) >> 8);
+
+                                    if (R < 0) R = 0; if (R > 255) R = 255;
+                                    if (G < 0) G = 0; if (G > 255) G = 255;
+                                    if (B < 0) B = 0; if (B > 255) B = 255;
+
+                                    int outIdx = (outY * rgbWidth + x) * 3;
+                                    rgbBuffer[outIdx + 0] = (uint8_t)B;
+                                    rgbBuffer[outIdx + 1] = (uint8_t)G;
+                                    rgbBuffer[outIdx + 2] = (uint8_t)R;
+                                }
+                            }
+                            rgbData = rgbBuffer;
+                            if (frameCount == 0) {
+                                LOG("capture_thread: NV12 conversion (curLen=%u)\n", curLen);
                             }
                         } else {
                             if (frameCount == 0) {
