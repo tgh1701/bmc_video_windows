@@ -199,22 +199,32 @@ int getCameraDeviceCount(void) {
     UINT32 count = 0;
     BOOL shouldUninit = FALSE;
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    LOG("getCameraDeviceCount: enter\n", 0);
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     shouldUninit = SUCCEEDED(hr);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 0;
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        LOG("getCameraDeviceCount: CoInitializeEx failed: 0x%08X\n", hr);
+        return 0;
+    }
+    LOG("getCameraDeviceCount: CoInitializeEx ok (shouldUninit=%d)\n", shouldUninit);
 
     hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
     if (FAILED(hr)) {
+        LOG("getCameraDeviceCount: MFStartup failed: 0x%08X\n", hr);
         if (shouldUninit) CoUninitialize();
         return 0;
     }
+    LOG("getCameraDeviceCount: MFStartup ok\n", 0);
 
     hr = enumerate_devices(&ppDevices, &count);
+    LOG("getCameraDeviceCount: enumerate_devices hr=0x%08X count=%u\n", hr, count);
     free_device_list(ppDevices, count);
 
     MFShutdown();
     if (shouldUninit) CoUninitialize();
 
+    LOG("getCameraDeviceCount: returning %d\n", SUCCEEDED(hr) ? (int)count : 0);
     return SUCCEEDED(hr) ? (int)count : 0;
 }
 
@@ -226,7 +236,7 @@ const char* getCameraDeviceName(int index) {
 
     s_nameBuf[0] = '\0';
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     shouldUninit = SUCCEEDED(hr);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return s_nameBuf;
 
@@ -264,7 +274,7 @@ const char* getCameraDeviceId(int index) {
 
     s_idBuf[0] = '\0';
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     shouldUninit = SUCCEEDED(hr);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return s_idBuf;
 
