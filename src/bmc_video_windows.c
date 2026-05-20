@@ -131,6 +131,12 @@ static const GUID MY_GUID_WICPixelFormat24bppBGR = {
     {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0c}
 };
 
+// IID_IMFMediaSource = {279A808D-AEC7-40C8-9C6B-A6B492C78A66}
+static const GUID MY_IID_IMFMediaSource = {
+    0x279a808d, 0xaec7, 0x40c8,
+    {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}
+};
+
 // ============================================================================
 // Capture State
 // ============================================================================
@@ -482,65 +488,72 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     int actualWidth = state->width;
     int actualHeight = state->height;
 
+    LOG("capture_thread: ENTER (device=%d, %dx%d@%dfps)\n", state->deviceIndex, state->width, state->height, state->fps);
+
     // Allocate JPEG output buffer (max ~500KB for 640x480)
     int jpegBufSize = 512 * 1024;
     uint8_t* tempJpeg = (uint8_t*)malloc(jpegBufSize);
     if (!tempJpeg) {
-        LOG("Failed to allocate JPEG buffer\n", 0);
+        LOG("capture_thread: Failed to allocate JPEG buffer\n", 0);
         state->running = 0;
         return 1;
     }
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        LOG("CoInitializeEx failed: 0x%08X\n", hr);
+        LOG("capture_thread: CoInitializeEx failed: 0x%08X\n", hr);
         free(tempJpeg);
         state->running = 0;
         return 1;
     }
+    LOG("capture_thread: CoInitializeEx ok\n", 0);
 
     hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
     if (FAILED(hr)) {
-        LOG("MFStartup failed: 0x%08X\n", hr);
+        LOG("capture_thread: MFStartup failed: 0x%08X\n", hr);
         free(tempJpeg);
         CoUninitialize();
         state->running = 0;
         return 1;
     }
+    LOG("capture_thread: MFStartup ok\n", 0);
 
     // Enumerate devices
     hr = enumerate_devices(&ppDevices, &deviceCount);
     if (FAILED(hr) || deviceCount == 0) {
-        LOG("No camera devices found\n", 0);
+        LOG("capture_thread: No camera devices found (hr=0x%08X, count=%u)\n", hr, deviceCount);
         goto exit;
     }
+    LOG("capture_thread: Found %u devices\n", deviceCount);
 
     int devIdx = state->deviceIndex;
     if (devIdx < 0 || (UINT32)devIdx >= deviceCount) devIdx = 0;
 
-    LOG("Using camera device %d of %u\n", devIdx, deviceCount);
+    LOG("capture_thread: Using camera device %d of %u\n", devIdx, deviceCount);
 
     // Activate the device to get IMFMediaSource
     hr = ppDevices[devIdx]->lpVtbl->ActivateObject(
         ppDevices[devIdx],
-        &IID_IMFMediaSource,
+        &MY_IID_IMFMediaSource,
         (void**)&pSource);
     if (FAILED(hr)) {
-        LOG("ActivateObject failed: 0x%08X\n", hr);
+        LOG("capture_thread: ActivateObject failed: 0x%08X\n", hr);
         goto exit;
     }
+    LOG("capture_thread: ActivateObject ok, pSource=%p\n", pSource);
 
     // Create source reader
     hr = MFCreateSourceReaderFromMediaSource(pSource, NULL, &pReader);
     if (FAILED(hr)) {
-        LOG("MFCreateSourceReaderFromMediaSource failed: 0x%08X\n", hr);
+        LOG("capture_thread: MFCreateSourceReaderFromMediaSource failed: 0x%08X\n", hr);
         goto exit;
     }
+    LOG("capture_thread: SourceReader created ok\n", 0);
 
     // Configure output format: request RGB24 (MF will auto-convert)
     hr = MFCreateMediaType(&pOutputType);
     if (FAILED(hr)) {
-        LOG("MFCreateMediaType failed: 0x%08X\n", hr);
+        LOG("capture_thread: MFCreateMediaType failed: 0x%08X\n", hr);
         goto exit;
     }
 
@@ -562,16 +575,19 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
         MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
     if (FAILED(hr)) {
-        LOG("SetCurrentMediaType RGB24 failed: 0x%08X, trying RGB32...\n", hr);
+        LOG("capture_thread: SetCurrentMediaType RGB24 failed: 0x%08X, trying RGB32...\n", hr);
 
         // Fallback: try RGB32
         pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
         hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
             MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
         if (FAILED(hr)) {
-            LOG("SetCurrentMediaType RGB32 also failed: 0x%08X\n", hr);
+            LOG("capture_thread: SetCurrentMediaType RGB32 also failed: 0x%08X\n", hr);
             goto exit;
         }
+        LOG("capture_thread: Using RGB32 format\n", 0);
+    } else {
+        LOG("capture_thread: Using RGB24 format\n", 0);
     }
 
     // Read back actual media type to get real resolution
@@ -593,10 +609,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     state->width = actualWidth;
     state->height = actualHeight;
 
-    LOG("Camera capture started: %dx%d @ %dfps, quality=%d\n",
+    LOG("capture_thread: CAPTURE LOOP STARTING: %dx%d @ %dfps, quality=%d\n",
         actualWidth, actualHeight, state->fps, state->jpegQuality);
 
     // Capture loop
+    int frameCount = 0;
     while (state->running) {
         DWORD streamIndex = 0;
         DWORD flags = 0;
@@ -608,13 +625,13 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
             0, &streamIndex, &flags, &timestamp, &pSample);
 
         if (FAILED(hr)) {
-            LOG("ReadSample failed: 0x%08X\n", hr);
+            LOG("capture_thread: ReadSample failed: 0x%08X\n", hr);
             Sleep(10);
             continue;
         }
 
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            LOG("End of stream\n", 0);
+            LOG("capture_thread: End of stream\n", 0);
             if (pSample) pSample->lpVtbl->Release(pSample);
             break;
         }
@@ -633,6 +650,13 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                         state->jpegQuality, tempJpeg, jpegBufSize);
 
                     if (jpegLen > 0) {
+                        frameCount++;
+                        if (frameCount == 1) {
+                            LOG("capture_thread: FIRST FRAME! jpegLen=%d\n", jpegLen);
+                        }
+                        if (frameCount % 30 == 0) {
+                            LOG("capture_thread: frame #%d, jpegLen=%d\n", frameCount, jpegLen);
+                        }
                         // Copy to shared buffer
                         WaitForSingleObject(state->frameMutex, INFINITE);
                         if (state->jpegBuffer == NULL || jpegLen > jpegBufSize) {
@@ -646,6 +670,10 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                             state->frameReady = 1;
                         }
                         ReleaseMutex(state->frameMutex);
+                    } else {
+                        if (frameCount == 0) {
+                            LOG("capture_thread: encode_rgb_to_jpeg returned 0 (curLen=%u)\n", curLen);
+                        }
                     }
 
                     pBuffer->lpVtbl->Unlock(pBuffer);
@@ -655,6 +683,8 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
             pSample->lpVtbl->Release(pSample);
         }
     }
+
+    LOG("capture_thread: loop ended, total frames=%d\n", frameCount);
 
 exit:
     if (pOutputType) pOutputType->lpVtbl->Release(pOutputType);
@@ -670,7 +700,7 @@ exit:
     CoUninitialize();
 
     state->running = 0;
-    LOG("Camera capture thread exited\n", 0);
+    LOG("capture_thread: EXIT\n", 0);
     return 0;
 }
 
