@@ -1177,15 +1177,52 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     LOG("capture_thread: SourceReader created ok (with video processing)\n", 0);
 
     // ========================================================================
-    // Step 1: Get native media type to understand camera's format
+    // Step 1: Find best matching native media type for requested resolution
     // ========================================================================
     IMFMediaType* pNativeType = NULL;
-    hr = pReader->lpVtbl->GetNativeMediaType(pReader,
-        MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &pNativeType);
-    if (FAILED(hr)) {
-        LOG("capture_thread: GetNativeMediaType failed: 0x%08X\n", hr);
-        goto exit;
+    IMFMediaType* pBestNativeType = NULL;
+    int bestMatchPixels = 0;
+
+    for (DWORD typeIdx = 0; typeIdx < 200; typeIdx++) {
+        IMFMediaType* pType = NULL;
+        hr = pReader->lpVtbl->GetNativeMediaType(pReader,
+            MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, typeIdx, &pType);
+        if (FAILED(hr)) break;
+
+        UINT64 fs = 0;
+        pType->lpVtbl->GetUINT64(pType, &MY_MF_MT_FRAME_SIZE, &fs);
+        int tw = (int)(fs >> 32);
+        int th = (int)(fs & 0xFFFFFFFF);
+
+        // Exact match?
+        if (tw == state->width && th == state->height) {
+            if (pBestNativeType) pBestNativeType->lpVtbl->Release(pBestNativeType);
+            pBestNativeType = pType; // don't release, keep it
+            LOG("capture_thread: Found exact native match: %dx%d\n", tw, th);
+            break;
+        }
+
+        // Track closest match (largest that fits)
+        int pixels = tw * th;
+        if (pixels > bestMatchPixels) {
+            bestMatchPixels = pixels;
+            if (pBestNativeType) pBestNativeType->lpVtbl->Release(pBestNativeType);
+            pBestNativeType = pType; // keep reference
+        } else {
+            pType->lpVtbl->Release(pType);
+        }
     }
+
+    // Use first native type as fallback
+    if (!pBestNativeType) {
+        hr = pReader->lpVtbl->GetNativeMediaType(pReader,
+            MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &pBestNativeType);
+        if (FAILED(hr)) {
+            LOG("capture_thread: GetNativeMediaType failed: 0x%08X\n", hr);
+            goto exit;
+        }
+    }
+    pNativeType = pBestNativeType;
 
     // Log native format details
     {
@@ -1198,39 +1235,30 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
         pNativeType->lpVtbl->GetUINT64(pNativeType, &MY_MF_MT_FRAME_SIZE, &nativeFrameSize);
         int nw = (int)(nativeFrameSize >> 32);
         int nh = (int)(nativeFrameSize & 0xFFFFFFFF);
-        LOG("capture_thread: Native resolution: %dx%d\n", nw, nh);
+        LOG("capture_thread: Selected native resolution: %dx%d (requested: %dx%d)\n",
+            nw, nh, state->width, state->height);
     }
 
     // ========================================================================
-    // Step 2: Try to set output format to RGB32 (copy native type, change subtype)
+    // Step 2: Try to set output format to RGB32/RGB24/native
     // ========================================================================
     int useNativeFormat = 0;  // 0 = RGB output, 1 = native NV12/YUY2
 
-    // Method: Copy all attributes from native type, just change subtype
     hr = MFCreateMediaType(&pOutputType);
     if (FAILED(hr)) {
         LOG("capture_thread: MFCreateMediaType failed: 0x%08X\n", hr);
         goto exit;
     }
 
-    // Copy all attributes from native type
+    // Copy all attributes from the MATCHED native type
     pNativeType->lpVtbl->CopyAllItems(pNativeType, (IMFAttributes*)pOutputType);
 
-    // Override with requested resolution and frame rate
-    {
-        UINT64 requestedSize = ((UINT64)state->width << 32) | (UINT64)state->height;
-        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_SIZE, requestedSize);
-        UINT64 requestedRate = ((UINT64)state->fps << 32) | 1ULL;
-        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_RATE, requestedRate);
-        LOG("capture_thread: Requesting resolution: %dx%d@%dfps\n", state->width, state->height, state->fps);
-    }
-
-    // Try RGB32 first (MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING supports YUV→RGB32)
+    // Try RGB32 first
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
     hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
         MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
     if (SUCCEEDED(hr)) {
-        LOG("capture_thread: Using RGB32 output (converted from native)\n", 0);
+        LOG("capture_thread: Using RGB32 output\n", 0);
     } else {
         LOG("capture_thread: RGB32 failed: 0x%08X, trying RGB24...\n", hr);
 
@@ -1239,12 +1267,12 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
         hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
             MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pOutputType);
         if (SUCCEEDED(hr)) {
-            LOG("capture_thread: Using RGB24 output (converted from native)\n", 0);
+            LOG("capture_thread: Using RGB24 output\n", 0);
         } else {
             LOG("capture_thread: RGB24 also failed: 0x%08X, using native format\n", hr);
             useNativeFormat = 1;
 
-            // Reset to native format
+            // Set the matched native type directly
             hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
                 MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pNativeType);
             if (FAILED(hr)) {
