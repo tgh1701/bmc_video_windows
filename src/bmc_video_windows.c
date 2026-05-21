@@ -7,6 +7,7 @@
 #include <mferror.h>
 #include <mftransform.h>
 #include <codecapi.h>
+#include <strmif.h>
 
 // WIC (Windows Imaging Component) for JPEG encoding
 #include <wincodec.h>
@@ -1025,9 +1026,13 @@ static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSi
 
                 // Check if keyframe
                 UINT32 isCleanPoint = 0;
-                hr = pResultSample->lpVtbl->GetUINT32(
-                    (IMFAttributes*)pResultSample, &MY_MFSampleExtension_CleanPoint, &isCleanPoint);
-                state->h265IsKeyFrame = (SUCCEEDED(hr) && isCleanPoint) ? 1 : 0;
+                IMFAttributes* pSampleAttrs = NULL;
+                hr = pResultSample->lpVtbl->QueryInterface(pResultSample, &IID_IMFAttributes, (void**)&pSampleAttrs);
+                if (SUCCEEDED(hr) && pSampleAttrs) {
+                    pSampleAttrs->lpVtbl->GetUINT32(pSampleAttrs, &MY_MFSampleExtension_CleanPoint, &isCleanPoint);
+                    pSampleAttrs->lpVtbl->Release(pSampleAttrs);
+                }
+                state->h265IsKeyFrame = isCleanPoint ? 1 : 0;
                 ReleaseMutex(state->frameMutex);
 
                 if (state->h265FrameIndex <= 3 || state->h265FrameIndex % 30 == 0) {
