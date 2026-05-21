@@ -307,6 +307,7 @@ typedef struct DecoderState {
     int height;
     int codecType;               // 1=H265, 2=H264
     int initialized;
+    int outputIsNV12;            // 1=NV12 output, 0=RGB32 output
 
     // Decoded output buffer (JPEG for Flutter display)
     HANDLE mutex;
@@ -1790,7 +1791,10 @@ int initVideoDecoder(int width, int height, int codecType) {
 
     hr = pDecoder->lpVtbl->SetOutputType(pDecoder, 0, pOutputType, 0);
     pOutputType->lpVtbl->Release(pOutputType);
-    if (FAILED(hr)) {
+    if (SUCCEEDED(hr)) {
+        g_decoder.outputIsNV12 = 1;
+        LOG("initVideoDecoder: using NV12 output\n", 0);
+    } else {
         LOG("initVideoDecoder: SetOutputType NV12 failed: 0x%08X, trying RGB32\n", hr);
 
         // Fallback: try RGB32
@@ -1807,6 +1811,8 @@ int initVideoDecoder(int width, int height, int codecType) {
             MFShutdown(); if (shouldUninit) CoUninitialize();
             return -1;
         }
+        g_decoder.outputIsNV12 = 0;
+        LOG("initVideoDecoder: using RGB32 output\n", 0);
     }
 
     // Start streaming
@@ -1925,38 +1931,47 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
         pResultBuffer->lpVtbl->Lock(pResultBuffer, &rawData, NULL, &rawLen);
 
         if (rawData && rawLen > 0) {
-            // Convert NV12/RGB to JPEG using WIC (reuse existing encode_to_jpeg logic)
-            // For simplicity, store raw data and let Flutter side handle it,
-            // or convert to JPEG here.
+            // Convert decoded frame to JPEG for Flutter display
             int w = g_decoder.width;
             int h = g_decoder.height;
-
-            // NV12 → RGB conversion
             int rgbSize = w * h * 3;
             uint8_t* rgbBuf = (uint8_t*)malloc(rgbSize);
             if (rgbBuf) {
-                // Simple NV12 to RGB24 conversion
-                const uint8_t* yPlane = rawData;
-                const uint8_t* uvPlane = rawData + w * h;
-                for (int row = 0; row < h; row++) {
-                    for (int col = 0; col < w; col++) {
-                        int y = yPlane[row * w + col];
-                        int u = uvPlane[(row/2) * w + (col & ~1)] - 128;
-                        int v = uvPlane[(row/2) * w + (col | 1)] - 128;
-                        int r = y + ((v * 359) >> 8);
-                        int g = y - ((u * 88 + v * 183) >> 8);
-                        int b = y + ((u * 454) >> 8);
-                        if (r < 0) r = 0; if (r > 255) r = 255;
-                        if (g < 0) g = 0; if (g > 255) g = 255;
-                        if (b < 0) b = 0; if (b > 255) b = 255;
-                        int idx = (row * w + col) * 3;
-                        rgbBuf[idx] = (uint8_t)r;
-                        rgbBuf[idx+1] = (uint8_t)g;
-                        rgbBuf[idx+2] = (uint8_t)b;
+                if (g_decoder.outputIsNV12) {
+                    // NV12 → BGR24 conversion (BGR for WIC GUID_WICPixelFormat24bppBGR)
+                    const uint8_t* yPlane = rawData;
+                    const uint8_t* uvPlane = rawData + w * h;
+                    for (int row = 0; row < h; row++) {
+                        for (int col = 0; col < w; col++) {
+                            int y = yPlane[row * w + col];
+                            int u = uvPlane[(row/2) * w + (col & ~1)] - 128;
+                            int v = uvPlane[(row/2) * w + (col | 1)] - 128;
+                            int r = y + ((v * 359) >> 8);
+                            int g = y - ((u * 88 + v * 183) >> 8);
+                            int b = y + ((u * 454) >> 8);
+                            if (r < 0) r = 0; if (r > 255) r = 255;
+                            if (g < 0) g = 0; if (g > 255) g = 255;
+                            if (b < 0) b = 0; if (b > 255) b = 255;
+                            int idx = (row * w + col) * 3;
+                            rgbBuf[idx]   = (uint8_t)b;  // B
+                            rgbBuf[idx+1] = (uint8_t)g;  // G
+                            rgbBuf[idx+2] = (uint8_t)r;  // R
+                        }
+                    }
+                } else {
+                    // RGB32 (BGRA) → BGR24 conversion
+                    for (int row = 0; row < h; row++) {
+                        for (int col = 0; col < w; col++) {
+                            int srcIdx = (row * w + col) * 4;  // BGRA
+                            int dstIdx = (row * w + col) * 3;  // BGR
+                            rgbBuf[dstIdx]   = rawData[srcIdx];     // B
+                            rgbBuf[dstIdx+1] = rawData[srcIdx+1];   // G
+                            rgbBuf[dstIdx+2] = rawData[srcIdx+2];   // R
+                        }
                     }
                 }
 
-                // Encode RGB to JPEG using WIC
+                // Encode BGR24 to JPEG using WIC
                 IWICImagingFactory* pFactory = NULL;
                 HRESULT jhr = CoCreateInstance(&CLSID_WICImagingFactory, NULL,
                     CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void**)&pFactory);
@@ -1971,19 +1986,17 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
                             IPropertyBag2* pProps = NULL;
                             pEnc->lpVtbl->CreateNewFrame(pEnc, &pFrame, &pProps);
                             if (pFrame) {
-                                // Set quality
                                 PROPBAG2 opt = {0}; opt.pstrName = L"ImageQuality";
                                 VARIANT varQ; VariantInit(&varQ); varQ.vt = VT_R4; varQ.fltVal = 0.7f;
                                 pProps->lpVtbl->Write(pProps, 1, &opt, &varQ);
                                 pFrame->lpVtbl->Initialize(pFrame, pProps);
                                 pFrame->lpVtbl->SetSize(pFrame, w, h);
-                                WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppRGB;
+                                WICPixelFormatGUID fmt = MY_GUID_WICPixelFormat24bppBGR;
                                 pFrame->lpVtbl->SetPixelFormat(pFrame, &fmt);
                                 pFrame->lpVtbl->WritePixels(pFrame, h, w * 3, rgbSize, rgbBuf);
                                 pFrame->lpVtbl->Commit(pFrame);
                                 pEnc->lpVtbl->Commit(pEnc);
 
-                                // Read JPEG from stream
                                 LARGE_INTEGER zero = {0};
                                 pStream->lpVtbl->Seek(pStream, zero, STREAM_SEEK_SET, NULL);
                                 STATSTG stat;
