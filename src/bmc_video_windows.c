@@ -5,6 +5,8 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#include <mftransform.h>
+#include <codecapi.h>
 
 // WIC (Windows Imaging Component) for JPEG encoding
 #include <wincodec.h>
@@ -15,6 +17,7 @@
 #include <shlwapi.h>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mf.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -169,6 +172,92 @@ static const GUID MY_MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING = {
     {0xb7, 0x22, 0x43, 0x5e, 0xc5, 0x13, 0xcc, 0x9e}
 };
 
+// === H.265/H.264 Encoder GUIDs ===
+
+// MFVideoFormat_HEVC = {43564548-0000-0010-8000-00AA00389B71}
+static const GUID MY_MFVideoFormat_HEVC = {
+    0x43564548, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+
+// MFVideoFormat_H264 = {34363248-0000-0010-8000-00AA00389B71}
+static const GUID MY_MFVideoFormat_H264 = {
+    0x34363248, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+
+// MFVideoFormat_NV12 = {3231564E-0000-0010-8000-00AA00389B71}
+static const GUID MY_MFVideoFormat_NV12 = {
+    0x3231564e, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+
+// MFVideoFormat_YUY2 = {32595559-0000-0010-8000-00AA00389B71}
+static const GUID MY_MFVideoFormat_YUY2 = {
+    0x32595559, 0x0000, 0x0010,
+    {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+};
+
+// IID_IMFTransform = {BF94C121-5B05-4E6F-8000-BA598961414D}
+static const GUID MY_IID_IMFTransform = {
+    0xbf94c121, 0x5b05, 0x4e6f,
+    {0x80, 0x00, 0xba, 0x59, 0x89, 0x61, 0x41, 0x4d}
+};
+
+// IID_ICodecAPI = {901DB4C7-31CE-41A2-85DC-8FA0BF41B8DA}
+static const GUID MY_IID_ICodecAPI = {
+    0x901db4c7, 0x31ce, 0x41a2,
+    {0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda}
+};
+
+// MF_MT_AVG_BITRATE = {20332624-FB0D-4D9E-BD0D-CBF6786C102E}
+static const GUID MY_MF_MT_AVG_BITRATE = {
+    0x20332624, 0xfb0d, 0x4d9e,
+    {0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e}
+};
+
+// MF_MT_INTERLACE_MODE = {E2724BB8-E676-4806-B4B2-A8D6EFB44CCD}
+static const GUID MY_MF_MT_INTERLACE_MODE = {
+    0xe2724bb8, 0xe676, 0x4806,
+    {0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd}
+};
+
+// CODECAPI_AVEncCommonRateControlMode = {1C0608E9-370C-4710-8A58-CB6181C42423}
+static const GUID MY_CODECAPI_AVEncCommonRateControlMode = {
+    0x1c0608e9, 0x370c, 0x4710,
+    {0x8a, 0x58, 0xcb, 0x61, 0x81, 0xc4, 0x24, 0x23}
+};
+
+// CODECAPI_AVEncMPVGOPSize = {95F31B26-95A4-41AE-9368-6480538D962D}
+static const GUID MY_CODECAPI_AVEncMPVGOPSize = {
+    0x95f31b26, 0x95a4, 0x41ae,
+    {0x93, 0x68, 0x64, 0x80, 0x53, 0x8d, 0x96, 0x2d}
+};
+
+// CODECAPI_AVLowLatencyMode = {9C27891A-ED7A-40E1-88E8-B22727A024EE}
+static const GUID MY_CODECAPI_AVLowLatencyMode = {
+    0x9c27891a, 0xed7a, 0x40e1,
+    {0x88, 0xe8, 0xb2, 0x27, 0x27, 0xa0, 0x24, 0xee}
+};
+
+// CODECAPI_AVEncVideoForceKeyFrame = {398C1B98-8353-475A-9EF2-8F265D260345}
+static const GUID MY_CODECAPI_AVEncVideoForceKeyFrame = {
+    0x398c1b98, 0x8353, 0x475a,
+    {0x9e, 0xf2, 0x8f, 0x26, 0x5d, 0x26, 0x03, 0x45}
+};
+
+// MFSampleExtension_CleanPoint = {9CDF01D8-A0F0-43BA-B077-EAA06CBD728A}
+static const GUID MY_MFSampleExtension_CleanPoint = {
+    0x9cdf01d8, 0xa0f0, 0x43ba,
+    {0xb0, 0x77, 0xea, 0xa0, 0x6c, 0xbd, 0x72, 0x8a}
+};
+
+// MF_TRANSFORM_ASYNC_UNLOCK = {E5666D6B-3422-4EB6-A421-DA7DB1F8E207}
+static const GUID MY_MF_TRANSFORM_ASYNC_UNLOCK = {
+    0xe5666d6b, 0x3422, 0x4eb6,
+    {0xa4, 0x21, 0xda, 0x7d, 0xb1, 0xf8, 0xe2, 0x07}
+};
+
 // ============================================================================
 // Capture State
 // ============================================================================
@@ -182,13 +271,27 @@ typedef struct CaptureState {
     HANDLE threadHandle;
     HANDLE frameMutex;
 
-    // Latest JPEG frame buffer (double buffer to avoid blocking)
+    // Latest JPEG frame buffer
     uint8_t* jpegBuffer;
     int jpegSize;
     volatile int frameReady;
 
     // Device index
     int deviceIndex;
+
+    // H.265/H.264 encoder state
+    IMFTransform* pEncoder;
+    ICodecAPI* pCodecAPI;
+    uint8_t* h265Buffer;         // Compressed video output buffer
+    int h265Size;
+    volatile int h265Ready;
+    int h265IsKeyFrame;
+    int h265Active;              // 1 = encoder running
+    int h265CodecType;           // 0=none, 1=H265, 2=H264
+    int h265Bitrate;
+    GUID h265InputSubtype;       // NV12 or YUY2
+    volatile int h265ForceKey;   // 1 = force next frame to be I-frame
+    LONGLONG h265FrameIndex;     // Frame counter for timestamps
 } CaptureState;
 
 static CaptureState g_capture = {0};
@@ -639,6 +742,335 @@ cleanup:
 }
 
 // ============================================================================
+// H.265/H.264 Encoder (via MFT - Media Foundation Transform)
+// ============================================================================
+
+/// Calculate auto bitrate based on resolution
+static int auto_bitrate(int width, int height) {
+    int pixels = width * height;
+    if (pixels >= 1920 * 1080) return 3000000;  // 3 Mbps for 1080p
+    if (pixels >= 1280 * 720)  return 1500000;  // 1.5 Mbps for 720p
+    return 500000;                               // 500 Kbps for 480p and below
+}
+
+/// Try to create and configure MFT encoder (H.265 first, then H.264 fallback)
+static int init_video_encoder(CaptureState* state, int width, int height, int fps, GUID inputSubtype, int bitrate) {
+    HRESULT hr;
+    IMFActivate** ppActivate = NULL;
+    UINT32 count = 0;
+    const GUID* codecSubtype = &MY_MFVideoFormat_HEVC;
+    int codecType = 1; // 1=H265
+
+    if (bitrate <= 0) bitrate = auto_bitrate(width, height);
+
+    LOG("init_video_encoder: %dx%d@%dfps, bitrate=%d, trying H.265...\n", width, height, fps, bitrate);
+
+    // Try H.265 first
+    MFT_REGISTER_TYPE_INFO outputInfo = {0};
+    memcpy(&outputInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
+    memcpy(&outputInfo.guidSubtype, &MY_MFVideoFormat_HEVC, sizeof(GUID));
+
+    hr = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_ENCODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        NULL, &outputInfo, &ppActivate, &count);
+
+    if (FAILED(hr) || count == 0) {
+        LOG("init_video_encoder: No H.265 encoder, trying H.264...\n", 0);
+        if (ppActivate) CoTaskMemFree(ppActivate);
+        ppActivate = NULL;
+        count = 0;
+
+        // Fallback to H.264
+        memcpy(&outputInfo.guidSubtype, &MY_MFVideoFormat_H264, sizeof(GUID));
+        codecSubtype = &MY_MFVideoFormat_H264;
+        codecType = 2; // 2=H264
+
+        hr = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            NULL, &outputInfo, &ppActivate, &count);
+
+        if (FAILED(hr) || count == 0) {
+            LOG("init_video_encoder: No H.264 encoder either, giving up\n", 0);
+            if (ppActivate) CoTaskMemFree(ppActivate);
+            return -1;
+        }
+    }
+
+    LOG("init_video_encoder: Found %u encoders, codec=%s\n", count, codecType == 1 ? "H265" : "H264");
+
+    // Activate the first encoder
+    IMFTransform* pEncoder = NULL;
+    hr = ppActivate[0]->lpVtbl->ActivateObject(ppActivate[0], &MY_IID_IMFTransform, (void**)&pEncoder);
+    for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+    CoTaskMemFree(ppActivate);
+
+    if (FAILED(hr) || !pEncoder) {
+        LOG("init_video_encoder: ActivateObject failed: 0x%08X\n", hr);
+        return -1;
+    }
+
+    // ===== Set OUTPUT type FIRST (required by MFT) =====
+    IMFMediaType* pOutputType = NULL;
+    MFCreateMediaType(&pOutputType);
+    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, codecSubtype);
+    MFSetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
+    MFSetAttributeRatio((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+    pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_AVG_BITRATE, (UINT32)bitrate);
+    pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_INTERLACE_MODE, 2); // MFVideoInterlace_Progressive
+
+    hr = pEncoder->lpVtbl->SetOutputType(pEncoder, 0, pOutputType, 0);
+    pOutputType->lpVtbl->Release(pOutputType);
+    if (FAILED(hr)) {
+        LOG("init_video_encoder: SetOutputType failed: 0x%08X\n", hr);
+        pEncoder->lpVtbl->Release(pEncoder);
+        return -1;
+    }
+
+    // ===== Set INPUT type =====
+    IMFMediaType* pInputType = NULL;
+    MFCreateMediaType(&pInputType);
+    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &inputSubtype);
+    MFSetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+    MFSetAttributeRatio((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+    pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
+
+    hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
+    pInputType->lpVtbl->Release(pInputType);
+    if (FAILED(hr)) {
+        LOG("init_video_encoder: SetInputType failed: 0x%08X (subtype may not be supported)\n", hr);
+        // Try NV12 as alternative input
+        if (!IsEqualGUID(&inputSubtype, &MY_MFVideoFormat_NV12)) {
+            LOG("init_video_encoder: Retrying with NV12 input...\n", 0);
+            MFCreateMediaType(&pInputType);
+            pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+            pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_NV12);
+            MFSetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+            MFSetAttributeRatio((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+            pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
+            hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
+            pInputType->lpVtbl->Release(pInputType);
+            if (FAILED(hr)) {
+                LOG("init_video_encoder: NV12 input also failed: 0x%08X\n", hr);
+                pEncoder->lpVtbl->Release(pEncoder);
+                return -1;
+            }
+            memcpy(&state->h265InputSubtype, &MY_MFVideoFormat_NV12, sizeof(GUID));
+        } else {
+            pEncoder->lpVtbl->Release(pEncoder);
+            return -1;
+        }
+    } else {
+        memcpy(&state->h265InputSubtype, &inputSubtype, sizeof(GUID));
+    }
+
+    // ===== Configure via ICodecAPI =====
+    ICodecAPI* pCodecAPI = NULL;
+    hr = pEncoder->lpVtbl->QueryInterface(pEncoder, &MY_IID_ICodecAPI, (void**)&pCodecAPI);
+    if (SUCCEEDED(hr) && pCodecAPI) {
+        VARIANT var;
+        VariantInit(&var);
+
+        // CBR rate control
+        var.vt = VT_UI4;
+        var.ulVal = 0; // eAVEncCommonRateControlMode_CBR
+        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncCommonRateControlMode, &var);
+
+        // GOP size (keyframe interval = 2 seconds)
+        var.vt = VT_UI4;
+        var.ulVal = fps * 2;
+        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncMPVGOPSize, &var);
+
+        // Low latency mode (critical for real-time video call)
+        var.vt = VT_BOOL;
+        var.boolVal = VARIANT_TRUE;
+        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVLowLatencyMode, &var);
+
+        LOG("init_video_encoder: ICodecAPI configured (CBR, GOP=%d, low_latency)\n", fps * 2);
+    }
+
+    // Notify encoder to start streaming
+    hr = pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    if (FAILED(hr)) {
+        LOG("init_video_encoder: BEGIN_STREAMING failed: 0x%08X\n", hr);
+    }
+    hr = pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+    // Store in state
+    state->pEncoder = pEncoder;
+    state->pCodecAPI = pCodecAPI;
+    state->h265Active = 1;
+    state->h265CodecType = codecType;
+    state->h265Bitrate = bitrate;
+    state->h265FrameIndex = 0;
+    state->h265Buffer = (uint8_t*)malloc(512 * 1024); // 512KB for compressed output
+    state->h265Size = 0;
+    state->h265Ready = 0;
+    state->h265IsKeyFrame = 0;
+    state->h265ForceKey = 0;
+
+    LOG("init_video_encoder: SUCCESS! codec=%s, bitrate=%d\n",
+        codecType == 1 ? "H.265/HEVC" : "H.264/AVC", bitrate);
+    return 0;
+}
+
+/// Encode one raw frame via MFT. Outputs to state->h265Buffer.
+static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSize, int width, int height) {
+    if (!state->pEncoder || !state->h265Active) return -1;
+
+    HRESULT hr;
+
+    // Force keyframe if requested
+    if (state->h265ForceKey && state->pCodecAPI) {
+        VARIANT var;
+        VariantInit(&var);
+        var.vt = VT_UI4;
+        var.ulVal = 1;
+        state->pCodecAPI->lpVtbl->SetValue(state->pCodecAPI, &MY_CODECAPI_AVEncVideoForceKeyFrame, &var);
+        state->h265ForceKey = 0;
+        LOG("encode_video_frame: Forced keyframe\n", 0);
+    }
+
+    // Create input buffer
+    IMFMediaBuffer* pInBuffer = NULL;
+    hr = MFCreateMemoryBuffer(rawSize, &pInBuffer);
+    if (FAILED(hr)) return -1;
+
+    BYTE* pData = NULL;
+    pInBuffer->lpVtbl->Lock(pInBuffer, &pData, NULL, NULL);
+    memcpy(pData, rawData, rawSize);
+    pInBuffer->lpVtbl->Unlock(pInBuffer);
+    pInBuffer->lpVtbl->SetCurrentLength(pInBuffer, rawSize);
+
+    // Create input sample
+    IMFSample* pInSample = NULL;
+    MFCreateSample(&pInSample);
+    pInSample->lpVtbl->AddBuffer(pInSample, pInBuffer);
+
+    // Set timestamp (100-nanosecond units)
+    LONGLONG ts = state->h265FrameIndex * 10000000LL / state->fps;
+    LONGLONG dur = 10000000LL / state->fps;
+    pInSample->lpVtbl->SetSampleTime(pInSample, ts);
+    pInSample->lpVtbl->SetSampleDuration(pInSample, dur);
+    state->h265FrameIndex++;
+
+    // Feed to encoder
+    hr = state->pEncoder->lpVtbl->ProcessInput(state->pEncoder, 0, pInSample, 0);
+    pInSample->lpVtbl->Release(pInSample);
+    pInBuffer->lpVtbl->Release(pInBuffer);
+
+    if (FAILED(hr)) {
+        if (state->h265FrameIndex <= 2) {
+            LOG("encode_video_frame: ProcessInput failed: 0x%08X\n", hr);
+        }
+        return -1;
+    }
+
+    // Try to get output
+    MFT_OUTPUT_STREAM_INFO streamInfo = {0};
+    state->pEncoder->lpVtbl->GetOutputStreamInfo(state->pEncoder, 0, &streamInfo);
+
+    MFT_OUTPUT_DATA_BUFFER outputData = {0};
+    IMFSample* pOutSample = NULL;
+
+    if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+        // We need to provide the output sample
+        MFCreateSample(&pOutSample);
+        IMFMediaBuffer* pOutBuffer = NULL;
+        DWORD outBufSize = streamInfo.cbSize > 0 ? streamInfo.cbSize : 512 * 1024;
+        MFCreateMemoryBuffer(outBufSize, &pOutBuffer);
+        pOutSample->lpVtbl->AddBuffer(pOutSample, pOutBuffer);
+        pOutBuffer->lpVtbl->Release(pOutBuffer);
+        outputData.pSample = pOutSample;
+    }
+
+    DWORD status = 0;
+    hr = state->pEncoder->lpVtbl->ProcessOutput(state->pEncoder, 0, 1, &outputData, &status);
+
+    if (hr == ((HRESULT)0xC00D6D72L)) { // MF_E_TRANSFORM_NEED_MORE_INPUT
+        // Encoder needs more frames before producing output (normal for first few frames)
+        if (pOutSample) pOutSample->lpVtbl->Release(pOutSample);
+        return 0;
+    }
+
+    if (FAILED(hr)) {
+        if (state->h265FrameIndex <= 5) {
+            LOG("encode_video_frame: ProcessOutput failed: 0x%08X\n", hr);
+        }
+        if (pOutSample) pOutSample->lpVtbl->Release(pOutSample);
+        return -1;
+    }
+
+    // Extract compressed data
+    IMFSample* pResultSample = outputData.pSample;
+    if (pResultSample) {
+        IMFMediaBuffer* pEncodedBuf = NULL;
+        hr = pResultSample->lpVtbl->ConvertToContiguousBuffer(pResultSample, &pEncodedBuf);
+        if (SUCCEEDED(hr)) {
+            BYTE* pEncData = NULL;
+            DWORD encLen = 0;
+            pEncodedBuf->lpVtbl->Lock(pEncodedBuf, &pEncData, NULL, &encLen);
+
+            if (pEncData && encLen > 0 && state->h265Buffer) {
+                int copyLen = (int)encLen;
+                if (copyLen > 512 * 1024) copyLen = 512 * 1024;
+
+                WaitForSingleObject(state->frameMutex, INFINITE);
+                memcpy(state->h265Buffer, pEncData, copyLen);
+                state->h265Size = copyLen;
+                state->h265Ready = 1;
+
+                // Check if keyframe
+                UINT32 isCleanPoint = 0;
+                hr = pResultSample->lpVtbl->GetUINT32(
+                    (IMFAttributes*)pResultSample, &MY_MFSampleExtension_CleanPoint, &isCleanPoint);
+                state->h265IsKeyFrame = (SUCCEEDED(hr) && isCleanPoint) ? 1 : 0;
+                ReleaseMutex(state->frameMutex);
+
+                if (state->h265FrameIndex <= 3 || state->h265FrameIndex % 30 == 0) {
+                    LOG("encode_video_frame: frame #%lld, encoded=%d bytes, keyframe=%d\n",
+                        state->h265FrameIndex, copyLen, state->h265IsKeyFrame);
+                }
+            }
+
+            pEncodedBuf->lpVtbl->Unlock(pEncodedBuf);
+            pEncodedBuf->lpVtbl->Release(pEncodedBuf);
+        }
+    }
+
+    if (pOutSample && pOutSample != outputData.pSample) pOutSample->lpVtbl->Release(pOutSample);
+    if (outputData.pSample) outputData.pSample->lpVtbl->Release(outputData.pSample);
+
+    return 1;
+}
+
+/// Cleanup H.265/H.264 encoder
+static void cleanup_video_encoder(CaptureState* state) {
+    if (state->pEncoder) {
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_COMMAND_DRAIN, 0);
+        state->pEncoder->lpVtbl->Release(state->pEncoder);
+        state->pEncoder = NULL;
+    }
+    if (state->pCodecAPI) {
+        state->pCodecAPI->lpVtbl->Release(state->pCodecAPI);
+        state->pCodecAPI = NULL;
+    }
+    if (state->h265Buffer) {
+        free(state->h265Buffer);
+        state->h265Buffer = NULL;
+    }
+    state->h265Active = 0;
+    state->h265CodecType = 0;
+    state->h265Size = 0;
+    state->h265Ready = 0;
+    LOG("cleanup_video_encoder: done\n", 0);
+}
+
+// ============================================================================
 // Camera Capture Thread
 // ============================================================================
 
@@ -841,6 +1273,23 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
         actualWidth, actualHeight, state->jpegQuality, useNativeFormat);
 
     // ========================================================================
+    // Step 3.5: Initialize H.265/H.264 encoder
+    // ========================================================================
+    {
+        // Determine native format for encoder input
+        GUID nativeSubtype = MY_MFVideoFormat_NV12; // default
+        if (useNativeFormat) {
+            DWORD expectedYUY2 = (DWORD)(actualWidth * actualHeight * 2);
+            // We'll detect actual format in the first frame, use YUY2 as likely default
+            nativeSubtype = MY_MFVideoFormat_YUY2;
+        }
+        int encResult = init_video_encoder(state, actualWidth, actualHeight, state->fps, nativeSubtype, 0);
+        if (encResult != 0) {
+            LOG("capture_thread: H.265/H.264 encoder not available, JPEG only\n", 0);
+        }
+    }
+
+    // ========================================================================
     // Step 4: Capture loop
     // ========================================================================
     int frameCount = 0;
@@ -874,6 +1323,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                 DWORD maxLen = 0, curLen = 0;
                 hr = pBuffer->lpVtbl->Lock(pBuffer, &pBits, &maxLen, &curLen);
                 if (SUCCEEDED(hr) && pBits && curLen > 0) {
+                    // === H.265/H.264 encode (raw YUV data before RGB conversion) ===
+                    if (state->h265Active && useNativeFormat) {
+                        encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
+                    }
+
                     BYTE* rgbData = pBits;
                     int rgbWidth = actualWidth;
                     int rgbHeight = actualHeight;
@@ -1017,6 +1471,7 @@ exit:
     free_device_list(ppDevices, deviceCount);
 
     free(tempJpeg);
+    cleanup_video_encoder(state);
     MFShutdown();
     CoUninitialize();
 
@@ -1139,4 +1594,40 @@ FFI_PLUGIN_EXPORT
 const char* getLogFilePath(void) {
     init_log_file();
     return s_logFilePath;
+}
+
+// ============================================================================
+// H.265/H.264 Encoder API
+// ============================================================================
+
+FFI_PLUGIN_EXPORT
+int getLatestH265Frame(uint8_t* buffer, int bufferSize) {
+    if (!g_capture.h265Active || !g_capture.h265Ready) return 0;
+
+    int copied = 0;
+    WaitForSingleObject(g_capture.frameMutex, 100);
+    if (g_capture.h265Ready && g_capture.h265Buffer && g_capture.h265Size > 0) {
+        int copyLen = g_capture.h265Size;
+        if (copyLen > bufferSize) copyLen = bufferSize;
+        memcpy(buffer, g_capture.h265Buffer, copyLen);
+        copied = copyLen;
+        g_capture.h265Ready = 0;
+    }
+    ReleaseMutex(g_capture.frameMutex);
+    return copied;
+}
+
+FFI_PLUGIN_EXPORT
+int isH265KeyFrame(void) {
+    return g_capture.h265IsKeyFrame;
+}
+
+FFI_PLUGIN_EXPORT
+int getH265CodecType(void) {
+    return g_capture.h265CodecType; // 0=none, 1=H265, 2=H264
+}
+
+FFI_PLUGIN_EXPORT
+void forceH265KeyFrame(void) {
+    g_capture.h265ForceKey = 1;
 }

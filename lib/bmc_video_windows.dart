@@ -197,6 +197,52 @@ void disposeFrameBuffer() {
 }
 
 // ============================================================================
+// H.265/H.264 Video Encoder
+// ============================================================================
+
+// Native function typedefs for H.265 encoder
+typedef _GetLatestH265FrameC = Int32 Function(Pointer<Uint8> buffer, Int32 bufferSize);
+typedef _GetLatestH265FrameDart = int Function(Pointer<Uint8> buffer, int bufferSize);
+typedef _IsH265KeyFrameC = Int32 Function();
+typedef _IsH265KeyFrameDart = int Function();
+typedef _GetH265CodecTypeC = Int32 Function();
+typedef _GetH265CodecTypeDart = int Function();
+typedef _ForceH265KeyFrameC = Void Function();
+typedef _ForceH265KeyFrameDart = void Function();
+
+/// H.265 frame buffer (512KB for compressed output)
+const int _maxH265BufferSize = 512 * 1024;
+Pointer<Uint8>? _h265Buffer;
+
+/// Get the latest H.265/H.264 encoded frame.
+/// Returns null if no new frame available.
+Uint8List? getLatestH265Frame() {
+  _h265Buffer ??= calloc<Uint8>(_maxH265BufferSize);
+  final getFrame = _dylib.lookupFunction<_GetLatestH265FrameC, _GetLatestH265FrameDart>('getLatestH265Frame');
+  final size = getFrame(_h265Buffer!, _maxH265BufferSize);
+  if (size <= 0) return null;
+  return Uint8List.fromList(_h265Buffer!.asTypedList(size));
+}
+
+/// Check if the latest H.265 frame is a keyframe (I-frame).
+bool isH265KeyFrame() {
+  final fn = _dylib.lookupFunction<_IsH265KeyFrameC, _IsH265KeyFrameDart>('isH265KeyFrame');
+  return fn() != 0;
+}
+
+/// Get active video codec type: 0=none, 1=H.265/HEVC, 2=H.264/AVC.
+int getH265CodecType() {
+  final fn = _dylib.lookupFunction<_GetH265CodecTypeC, _GetH265CodecTypeDart>('getH265CodecType');
+  return fn();
+}
+
+/// Force the next frame to be encoded as a keyframe.
+void forceH265KeyFrame() {
+  final fn = _dylib.lookupFunction<_ForceH265KeyFrameC, _ForceH265KeyFrameDart>('forceH265KeyFrame');
+  fn();
+}
+
+// ============================================================================
 // Debug Logging
 // ============================================================================
 

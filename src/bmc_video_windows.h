@@ -98,4 +98,25 @@ int getCameraResolutionCount(int deviceIndex);
 FFI_PLUGIN_EXPORT
 const char* getCameraResolution(int resIndex);
 
+// ============================================================================
+// H.265/H.264 Video Encoder
+// ============================================================================
+
+/// Get the latest H.265/H.264 encoded frame.
+/// Returns number of bytes copied, 0 if no new frame available.
+FFI_PLUGIN_EXPORT
+int getLatestH265Frame(uint8_t* buffer, int bufferSize);
+
+/// Check if the latest H.265 frame is a keyframe (I-frame).
+FFI_PLUGIN_EXPORT
+int isH265KeyFrame(void);
+
+/// Get active video codec type: 0=none, 1=H.265/HEVC, 2=H.264/AVC.
+FFI_PLUGIN_EXPORT
+int getH265CodecType(void);
+
+/// Force the next frame to be encoded as a keyframe.
+FFI_PLUGIN_EXPORT
+void forceH265KeyFrame(void);
+
 #endif // BMC_VIDEO_WINDOWS_H
