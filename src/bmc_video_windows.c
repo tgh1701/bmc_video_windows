@@ -343,6 +343,141 @@ const char* getCameraDeviceId(int index) {
 }
 
 // ============================================================================
+// Resolution Enumeration
+// ============================================================================
+
+// Cached resolution list
+#define MAX_RESOLUTIONS 64
+typedef struct {
+    int width;
+    int height;
+    int fps;
+} ResolutionInfo;
+
+static ResolutionInfo s_resolutions[MAX_RESOLUTIONS];
+static int s_resolutionCount = 0;
+static char s_resBuf[64];  // For returning resolution string
+
+FFI_PLUGIN_EXPORT
+int getCameraResolutionCount(int deviceIndex) {
+    IMFActivate** ppDevices = NULL;
+    UINT32 count = 0;
+    BOOL shouldUninit = FALSE;
+    s_resolutionCount = 0;
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    shouldUninit = SUCCEEDED(hr);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 0;
+
+    hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    if (FAILED(hr)) { if (shouldUninit) CoUninitialize(); return 0; }
+
+    hr = enumerate_devices(&ppDevices, &count);
+    if (FAILED(hr) || (UINT32)deviceIndex >= count) {
+        free_device_list(ppDevices, count);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return 0;
+    }
+
+    // Activate device and create source reader
+    IMFMediaSource* pSource = NULL;
+    hr = ppDevices[deviceIndex]->lpVtbl->ActivateObject(
+        ppDevices[deviceIndex], &MY_IID_IMFMediaSource, (void**)&pSource);
+    if (FAILED(hr)) {
+        free_device_list(ppDevices, count);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return 0;
+    }
+
+    IMFSourceReader* pReader = NULL;
+    hr = MFCreateSourceReaderFromMediaSource(pSource, NULL, &pReader);
+    if (FAILED(hr)) {
+        pSource->lpVtbl->Shutdown(pSource);
+        pSource->lpVtbl->Release(pSource);
+        free_device_list(ppDevices, count);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return 0;
+    }
+
+    // Enumerate all native media types
+    int resCount = 0;
+    for (DWORD typeIndex = 0; typeIndex < 200; typeIndex++) {
+        IMFMediaType* pType = NULL;
+        hr = pReader->lpVtbl->GetNativeMediaType(pReader,
+            MY_MF_SOURCE_READER_FIRST_VIDEO_STREAM, typeIndex, &pType);
+        if (FAILED(hr)) break;  // No more types
+
+        UINT64 frameSize = 0;
+        pType->lpVtbl->GetUINT64(pType, &MY_MF_MT_FRAME_SIZE, &frameSize);
+        int w = (int)(frameSize >> 32);
+        int h = (int)(frameSize & 0xFFFFFFFF);
+
+        UINT64 frameRate = 0;
+        pType->lpVtbl->GetUINT64(pType, &MY_MF_MT_FRAME_RATE, &frameRate);
+        int fpsNum = (int)(frameRate >> 32);
+        int fpsDen = (int)(frameRate & 0xFFFFFFFF);
+        int fps = (fpsDen > 0) ? (fpsNum / fpsDen) : 0;
+
+        pType->lpVtbl->Release(pType);
+
+        if (w <= 0 || h <= 0) continue;
+
+        // De-duplicate (same w,h,fps already exists?)
+        int found = 0;
+        for (int i = 0; i < resCount; i++) {
+            if (s_resolutions[i].width == w && s_resolutions[i].height == h && s_resolutions[i].fps == fps) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found && resCount < MAX_RESOLUTIONS) {
+            s_resolutions[resCount].width = w;
+            s_resolutions[resCount].height = h;
+            s_resolutions[resCount].fps = fps;
+            resCount++;
+        }
+    }
+
+    s_resolutionCount = resCount;
+
+    // Sort by resolution (descending: largest first)
+    for (int i = 0; i < resCount - 1; i++) {
+        for (int j = i + 1; j < resCount; j++) {
+            int pixI = s_resolutions[i].width * s_resolutions[i].height;
+            int pixJ = s_resolutions[j].width * s_resolutions[j].height;
+            if (pixJ > pixI || (pixJ == pixI && s_resolutions[j].fps > s_resolutions[i].fps)) {
+                ResolutionInfo tmp = s_resolutions[i];
+                s_resolutions[i] = s_resolutions[j];
+                s_resolutions[j] = tmp;
+            }
+        }
+    }
+
+    pReader->lpVtbl->Release(pReader);
+    pSource->lpVtbl->Shutdown(pSource);
+    pSource->lpVtbl->Release(pSource);
+    free_device_list(ppDevices, count);
+    MFShutdown();
+    if (shouldUninit) CoUninitialize();
+
+    LOG("getCameraResolutionCount: device=%d, found %d resolutions\n", deviceIndex, resCount);
+    return resCount;
+}
+
+/// Get resolution info as string "WIDTHxHEIGHT@FPS" at given index.
+/// Must call getCameraResolutionCount() first to populate the list.
+FFI_PLUGIN_EXPORT
+const char* getCameraResolution(int resIndex) {
+    s_resBuf[0] = '\0';
+    if (resIndex < 0 || resIndex >= s_resolutionCount) return s_resBuf;
+    sprintf_s(s_resBuf, sizeof(s_resBuf), "%dx%d@%d",
+        s_resolutions[resIndex].width,
+        s_resolutions[resIndex].height,
+        s_resolutions[resIndex].fps);
+    return s_resBuf;
+}
+
+// ============================================================================
 // JPEG Encoding using WIC
 // ============================================================================
 
@@ -522,8 +657,8 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
 
     LOG("capture_thread: ENTER (device=%d, %dx%d@%dfps)\n", state->deviceIndex, state->width, state->height, state->fps);
 
-    // Allocate JPEG output buffer (max ~500KB for 640x480)
-    int jpegBufSize = 512 * 1024;
+    // Allocate JPEG output buffer (2MB for high-res)
+    int jpegBufSize = 2 * 1024 * 1024;
     uint8_t* tempJpeg = (uint8_t*)malloc(jpegBufSize);
     if (!tempJpeg) {
         LOG("capture_thread: Failed to allocate JPEG buffer\n", 0);
@@ -910,7 +1045,7 @@ int startCameraCapture(int deviceIndex, int width, int height, int fps, int jpeg
     g_capture.jpegQuality = (jpegQuality > 0 && jpegQuality <= 100) ? jpegQuality : 60;
     g_capture.running = 1;
     g_capture.frameReady = 0;
-    g_capture.jpegBuffer = (uint8_t*)malloc(512 * 1024);
+    g_capture.jpegBuffer = (uint8_t*)malloc(2 * 1024 * 1024);  // 2MB for high-res JPEG
     g_capture.jpegSize = 0;
 
     g_capture.frameMutex = CreateMutex(NULL, FALSE, NULL);

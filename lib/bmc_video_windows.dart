@@ -60,6 +60,80 @@ List<BmcVideoDevice> listCameraDevices() {
 }
 
 // ============================================================================
+// Resolution Enumeration
+// ============================================================================
+
+/// Camera resolution info.
+class CameraResolution {
+  final int width;
+  final int height;
+  final int fps;
+
+  CameraResolution({
+    required this.width,
+    required this.height,
+    required this.fps,
+  });
+
+  /// Display label like "1920x1080 (30fps)"
+  String get label => '${width}x$height (${fps}fps)';
+
+  /// Total pixels for comparison
+  int get pixels => width * height;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CameraResolution &&
+          width == other.width &&
+          height == other.height &&
+          fps == other.fps;
+
+  @override
+  int get hashCode => width.hashCode ^ height.hashCode ^ fps.hashCode;
+
+  @override
+  String toString() => label;
+}
+
+// Native function typedefs for resolution enumeration
+typedef _GetCameraResolutionCountC = Int32 Function(Int32 deviceIndex);
+typedef _GetCameraResolutionCountDart = int Function(int deviceIndex);
+typedef _GetCameraResolutionC = Pointer<Utf8> Function(Int32 resIndex);
+typedef _GetCameraResolutionDart = Pointer<Utf8> Function(int resIndex);
+
+/// List all supported resolutions for a camera device.
+/// Returns sorted list (best/highest resolution first).
+List<CameraResolution> listCameraResolutions(int deviceIndex) {
+  final getCount = _dylib.lookupFunction<_GetCameraResolutionCountC, _GetCameraResolutionCountDart>('getCameraResolutionCount');
+  final getRes = _dylib.lookupFunction<_GetCameraResolutionC, _GetCameraResolutionDart>('getCameraResolution');
+
+  final count = getCount(deviceIndex);
+  final resolutions = <CameraResolution>[];
+
+  for (int i = 0; i < count; i++) {
+    final ptr = getRes(i);
+    final str = ptr.toDartString(); // "1920x1080@30"
+    if (str.isEmpty) continue;
+
+    // Parse "WIDTHxHEIGHT@FPS"
+    final parts = str.split('@');
+    if (parts.length != 2) continue;
+    final wh = parts[0].split('x');
+    if (wh.length != 2) continue;
+
+    final w = int.tryParse(wh[0]) ?? 0;
+    final h = int.tryParse(wh[1]) ?? 0;
+    final fps = int.tryParse(parts[1]) ?? 0;
+    if (w > 0 && h > 0) {
+      resolutions.add(CameraResolution(width: w, height: h, fps: fps));
+    }
+  }
+
+  return resolutions;
+}
+
+// ============================================================================
 // Camera Capture Control
 // ============================================================================
 
@@ -89,8 +163,8 @@ bool isCapturing() => _bindings.isCameraCapturing() != 0;
 // Frame Retrieval
 // ============================================================================
 
-/// Maximum JPEG frame buffer size (512 KB - sufficient for 640x480 JPEG).
-const int _maxJpegBufferSize = 512 * 1024;
+/// Maximum JPEG frame buffer size (2 MB - sufficient for up to 4K JPEG).
+const int _maxJpegBufferSize = 2 * 1024 * 1024;
 
 /// Reusable native buffer to avoid repeated allocation.
 Pointer<Uint8>? _frameBuffer;

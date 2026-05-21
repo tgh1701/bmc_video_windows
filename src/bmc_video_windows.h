@@ -81,4 +81,21 @@ int getFrameHeight(void);
 FFI_PLUGIN_EXPORT
 const char* getLogFilePath(void);
 
+// ============================================================================
+// Resolution Enumeration
+// ============================================================================
+
+/// Get number of unique supported resolutions for a camera device.
+/// This enumerates all native media types, de-duplicates, and sorts by
+/// resolution descending (best first). Results are cached internally.
+/// Returns number of unique resolutions found.
+FFI_PLUGIN_EXPORT
+int getCameraResolutionCount(int deviceIndex);
+
+/// Get resolution info as string "WIDTHxHEIGHT@FPS" at given index.
+/// Must call getCameraResolutionCount() first to populate the list.
+/// Index 0 = best (highest) resolution.
+FFI_PLUGIN_EXPORT
+const char* getCameraResolution(int resIndex);
+
 #endif // BMC_VIDEO_WINDOWS_H
