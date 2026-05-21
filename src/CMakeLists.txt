@@ -21,9 +21,10 @@ if (WIN32)
   set_source_files_properties("bmc_video_windows.c" PROPERTIES LANGUAGE C)
   set_target_properties(bmc_video_windows PROPERTIES LINKER_LANGUAGE C)
 
-  # Media Foundation + COM + WIC (for JPEG encoding) + shlwapi (for SHCreateMemStream)
+  # Media Foundation + COM + WIC + shlwapi + H.265 encoder (oleaut32 for VARIANT)
   target_link_libraries(bmc_video_windows PRIVATE
     ole32
+    oleaut32
     uuid
     mfplat
     mf
