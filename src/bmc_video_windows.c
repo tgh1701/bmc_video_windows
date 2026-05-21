@@ -1211,6 +1211,15 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     // Copy all attributes from native type
     pNativeType->lpVtbl->CopyAllItems(pNativeType, (IMFAttributes*)pOutputType);
 
+    // Override with requested resolution and frame rate
+    {
+        UINT64 requestedSize = ((UINT64)state->width << 32) | (UINT64)state->height;
+        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_SIZE, requestedSize);
+        UINT64 requestedRate = ((UINT64)state->fps << 32) | 1ULL;
+        pOutputType->lpVtbl->SetUINT64(pOutputType, &MY_MF_MT_FRAME_RATE, requestedRate);
+        LOG("capture_thread: Requesting resolution: %dx%d@%dfps\n", state->width, state->height, state->fps);
+    }
+
     // Try RGB32 first (MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING supports YUV→RGB32)
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
     hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
