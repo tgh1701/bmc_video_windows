@@ -754,6 +754,13 @@ static int auto_bitrate(int width, int height) {
     return 500000;                               // 500 Kbps for 480p and below
 }
 
+/// Pack two UINT32 into UINT64 for MF_MT_FRAME_SIZE / MF_MT_FRAME_RATE
+/// (C-compatible replacement for MFSetAttributeSize/MFSetAttributeRatio)
+static HRESULT my_SetAttributeSize(IMFAttributes* pAttrs, const GUID* guidKey, UINT32 w, UINT32 h) {
+    UINT64 packed = ((UINT64)w << 32) | (UINT64)h;
+    return pAttrs->lpVtbl->SetUINT64(pAttrs, guidKey, packed);
+}
+
 /// Try to create and configure MFT encoder (H.265 first, then H.264 fallback)
 static int init_video_encoder(CaptureState* state, int width, int height, int fps, GUID inputSubtype, int bitrate) {
     HRESULT hr;
@@ -817,8 +824,8 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
     MFCreateMediaType(&pOutputType);
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
     pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, codecSubtype);
-    MFSetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
-    MFSetAttributeRatio((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+    my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
+    my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, fps, 1);
     pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_AVG_BITRATE, (UINT32)bitrate);
     pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_INTERLACE_MODE, 2); // MFVideoInterlace_Progressive
 
@@ -835,8 +842,8 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
     MFCreateMediaType(&pInputType);
     pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
     pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &inputSubtype);
-    MFSetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
-    MFSetAttributeRatio((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+    my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+    my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
     pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
 
     hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
@@ -849,8 +856,8 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
             MFCreateMediaType(&pInputType);
             pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
             pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_NV12);
-            MFSetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
-            MFSetAttributeRatio((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+            my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+            my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
             pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
             hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
             pInputType->lpVtbl->Release(pInputType);
