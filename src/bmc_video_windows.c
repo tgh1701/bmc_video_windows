@@ -525,11 +525,16 @@ int getCameraResolutionCount(int deviceIndex) {
         pType->lpVtbl->Release(pType);
 
         if (w <= 0 || h <= 0) continue;
+        if (fps < 15) continue;  // Skip impractical low frame rates
 
-        // De-duplicate (same w,h,fps already exists?)
+        // De-duplicate by resolution (w,h) — keep highest fps
         int found = 0;
         for (int i = 0; i < resCount; i++) {
-            if (s_resolutions[i].width == w && s_resolutions[i].height == h && s_resolutions[i].fps == fps) {
+            if (s_resolutions[i].width == w && s_resolutions[i].height == h) {
+                // Same resolution, keep higher fps
+                if (fps > s_resolutions[i].fps) {
+                    s_resolutions[i].fps = fps;
+                }
                 found = 1;
                 break;
             }
