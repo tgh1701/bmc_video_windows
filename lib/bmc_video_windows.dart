@@ -243,6 +243,76 @@ void forceH265KeyFrame() {
 }
 
 // ============================================================================
+// H.265/H.264 Video Decoder (for remote video)
+// ============================================================================
+
+// Native function typedefs for decoder
+typedef _InitVideoDecoderC = Int32 Function(Int32 width, Int32 height, Int32 codecType);
+typedef _InitVideoDecoderDart = int Function(int width, int height, int codecType);
+typedef _DecodeVideoFrameC = Int32 Function(Pointer<Uint8> data, Int32 size);
+typedef _DecodeVideoFrameDart = int Function(Pointer<Uint8> data, int size);
+typedef _GetLatestDecodedFrameC = Int32 Function(Pointer<Uint8> buffer, Int32 maxSize);
+typedef _GetLatestDecodedFrameDart = int Function(Pointer<Uint8> buffer, int maxSize);
+typedef _CleanupVideoDecoderC = Void Function();
+typedef _CleanupVideoDecoderDart = void Function();
+
+/// Decoder frame buffer (512KB)
+const int _maxDecoderBufferSize = 512 * 1024;
+Pointer<Uint8>? _decoderBuffer;
+Pointer<Uint8>? _decoderInputBuffer;
+
+/// Initialize video decoder.
+/// [codecType]: 1=H.265/HEVC, 2=H.264/AVC.
+/// Returns 0 on success, -1 on failure.
+int initVideoDecoder(int width, int height, int codecType) {
+  final fn = _dylib.lookupFunction<_InitVideoDecoderC, _InitVideoDecoderDart>('initVideoDecoder');
+  return fn(width, height, codecType);
+}
+
+/// Decode a compressed video frame.
+/// Returns 1 (frame decoded), 0 (need more data), -1 (error).
+int decodeVideoFrame(Uint8List compressedData) {
+  final size = compressedData.length;
+  if (size <= 0) return -1;
+
+  // Allocate/reuse input buffer
+  if (_decoderInputBuffer == null || size > _maxDecoderBufferSize) {
+    if (_decoderInputBuffer != null) calloc.free(_decoderInputBuffer!);
+    _decoderInputBuffer = calloc<Uint8>(size > _maxDecoderBufferSize ? size : _maxDecoderBufferSize);
+  }
+
+  // Copy data to native buffer
+  _decoderInputBuffer!.asTypedList(size).setAll(0, compressedData);
+
+  final fn = _dylib.lookupFunction<_DecodeVideoFrameC, _DecodeVideoFrameDart>('decodeVideoFrame');
+  return fn(_decoderInputBuffer!, size);
+}
+
+/// Get latest decoded frame as JPEG bytes.
+/// Returns null if no frame available.
+Uint8List? getLatestDecodedFrame() {
+  _decoderBuffer ??= calloc<Uint8>(_maxDecoderBufferSize);
+  final fn = _dylib.lookupFunction<_GetLatestDecodedFrameC, _GetLatestDecodedFrameDart>('getLatestDecodedFrame');
+  final size = fn(_decoderBuffer!, _maxDecoderBufferSize);
+  if (size <= 0) return null;
+  return Uint8List.fromList(_decoderBuffer!.asTypedList(size));
+}
+
+/// Cleanup decoder and release resources.
+void cleanupVideoDecoder() {
+  final fn = _dylib.lookupFunction<_CleanupVideoDecoderC, _CleanupVideoDecoderDart>('cleanupVideoDecoder');
+  fn();
+  if (_decoderBuffer != null) {
+    calloc.free(_decoderBuffer!);
+    _decoderBuffer = null;
+  }
+  if (_decoderInputBuffer != null) {
+    calloc.free(_decoderInputBuffer!);
+    _decoderInputBuffer = null;
+  }
+}
+
+// ============================================================================
 // Debug Logging
 // ============================================================================
 

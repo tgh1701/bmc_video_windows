@@ -119,4 +119,28 @@ int getH265CodecType(void);
 FFI_PLUGIN_EXPORT
 void forceH265KeyFrame(void);
 
+// ============================================================================
+// H.265/H.264 Video Decoder (for remote video)
+// ============================================================================
+
+/// Initialize video decoder.
+/// codecType: 1=H.265/HEVC, 2=H.264/AVC.
+/// Returns 0 on success, -1 on failure.
+FFI_PLUGIN_EXPORT
+int initVideoDecoder(int width, int height, int codecType);
+
+/// Decode a compressed video frame.
+/// Returns 1 on success (frame decoded), 0 (need more data), -1 on error.
+FFI_PLUGIN_EXPORT
+int decodeVideoFrame(const uint8_t* compressedData, int compressedSize);
+
+/// Get latest decoded frame as JPEG bytes.
+/// Returns number of bytes copied, 0 if no frame available.
+FFI_PLUGIN_EXPORT
+int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize);
+
+/// Cleanup decoder and release resources.
+FFI_PLUGIN_EXPORT
+void cleanupVideoDecoder(void);
+
 #endif // BMC_VIDEO_WINDOWS_H

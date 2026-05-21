@@ -298,6 +298,27 @@ typedef struct CaptureState {
 static CaptureState g_capture = {0};
 
 // ============================================================================
+// Decoder State (for decoding received remote video)
+// ============================================================================
+
+typedef struct DecoderState {
+    IMFTransform* pDecoder;
+    int width;
+    int height;
+    int codecType;               // 1=H265, 2=H264
+    int initialized;
+
+    // Decoded output buffer (JPEG for Flutter display)
+    HANDLE mutex;
+    uint8_t* outputBuffer;       // JPEG encoded decoded frame
+    int outputSize;
+    volatile int frameReady;
+    LONGLONG frameIndex;
+} DecoderState;
+
+static DecoderState g_decoder = {0};
+
+// ============================================================================
 // Device Enumeration
 // ============================================================================
 
@@ -1684,4 +1705,360 @@ int getH265CodecType(void) {
 FFI_PLUGIN_EXPORT
 void forceH265KeyFrame(void) {
     g_capture.h265ForceKey = 1;
+}
+
+// ============================================================================
+// H.265/H.264 DECODER — decode received remote video
+// ============================================================================
+
+/// Initialize video decoder (H.265 first, then H.264 fallback)
+FFI_PLUGIN_EXPORT
+int initVideoDecoder(int width, int height, int codecType) {
+    if (g_decoder.initialized) {
+        LOG("initVideoDecoder: already initialized\n", 0);
+        return 0;
+    }
+
+    HRESULT hr;
+    BOOL shouldUninit = FALSE;
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    shouldUninit = SUCCEEDED(hr);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return -1;
+
+    hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    if (FAILED(hr)) { if (shouldUninit) CoUninitialize(); return -1; }
+
+    // Select codec GUID
+    const GUID* codecSubtype = NULL;
+    if (codecType == 1) {
+        codecSubtype = &MY_MFVideoFormat_HEVC;
+        LOG("initVideoDecoder: trying H.265/HEVC decoder\n", 0);
+    } else {
+        codecSubtype = &MY_MFVideoFormat_H264;
+        LOG("initVideoDecoder: trying H.264/AVC decoder\n", 0);
+    }
+
+    // Find decoder MFT
+    MFT_REGISTER_TYPE_INFO inputType = { MFMediaType_Video, *codecSubtype };
+    IMFActivate** ppActivate = NULL;
+    UINT32 numActivate = 0;
+
+    hr = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &inputType, NULL, &ppActivate, &numActivate);
+
+    if (FAILED(hr) || numActivate == 0) {
+        LOG("initVideoDecoder: no decoder found, hr=0x%08X\n", hr);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return -1;
+    }
+
+    IMFTransform* pDecoder = NULL;
+    hr = ppActivate[0]->lpVtbl->ActivateObject(ppActivate[0], &IID_IMFTransform, (void**)&pDecoder);
+    for (UINT32 i = 0; i < numActivate; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+    CoTaskMemFree(ppActivate);
+
+    if (FAILED(hr)) {
+        LOG("initVideoDecoder: ActivateObject failed: 0x%08X\n", hr);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return -1;
+    }
+
+    // Set INPUT type (compressed)
+    IMFMediaType* pInputType = NULL;
+    MFCreateMediaType(&pInputType);
+    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, codecSubtype);
+    my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+
+    hr = pDecoder->lpVtbl->SetInputType(pDecoder, 0, pInputType, 0);
+    pInputType->lpVtbl->Release(pInputType);
+    if (FAILED(hr)) {
+        LOG("initVideoDecoder: SetInputType failed: 0x%08X\n", hr);
+        pDecoder->lpVtbl->Release(pDecoder);
+        MFShutdown(); if (shouldUninit) CoUninitialize();
+        return -1;
+    }
+
+    // Set OUTPUT type (NV12 — we'll convert to RGB→JPEG ourselves)
+    IMFMediaType* pOutputType = NULL;
+    MFCreateMediaType(&pOutputType);
+    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_NV12);
+    my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
+
+    hr = pDecoder->lpVtbl->SetOutputType(pDecoder, 0, pOutputType, 0);
+    pOutputType->lpVtbl->Release(pOutputType);
+    if (FAILED(hr)) {
+        LOG("initVideoDecoder: SetOutputType NV12 failed: 0x%08X, trying RGB32\n", hr);
+
+        // Fallback: try RGB32
+        MFCreateMediaType(&pOutputType);
+        pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+        pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_RGB32);
+        my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
+
+        hr = pDecoder->lpVtbl->SetOutputType(pDecoder, 0, pOutputType, 0);
+        pOutputType->lpVtbl->Release(pOutputType);
+        if (FAILED(hr)) {
+            LOG("initVideoDecoder: SetOutputType RGB32 also failed: 0x%08X\n", hr);
+            pDecoder->lpVtbl->Release(pDecoder);
+            MFShutdown(); if (shouldUninit) CoUninitialize();
+            return -1;
+        }
+    }
+
+    // Start streaming
+    hr = pDecoder->lpVtbl->ProcessMessage(pDecoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    if (FAILED(hr)) LOG("initVideoDecoder: BEGIN_STREAMING warning: 0x%08X\n", hr);
+    hr = pDecoder->lpVtbl->ProcessMessage(pDecoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (FAILED(hr)) LOG("initVideoDecoder: START_OF_STREAM warning: 0x%08X\n", hr);
+
+    // Init state
+    g_decoder.pDecoder = pDecoder;
+    g_decoder.width = width;
+    g_decoder.height = height;
+    g_decoder.codecType = codecType;
+    g_decoder.mutex = CreateMutexA(NULL, FALSE, NULL);
+    g_decoder.outputBuffer = (uint8_t*)malloc(512 * 1024); // 512KB for decoded JPEG
+    g_decoder.outputSize = 0;
+    g_decoder.frameReady = 0;
+    g_decoder.frameIndex = 0;
+    g_decoder.initialized = 1;
+
+    LOG("initVideoDecoder: OK, %dx%d, codec=%d\n", width, height, codecType);
+    return 0;
+}
+
+/// Decode a compressed video frame (H.265/H.264 NAL units) → JPEG output
+FFI_PLUGIN_EXPORT
+int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
+    if (!g_decoder.initialized || !g_decoder.pDecoder) return -1;
+    if (!compressedData || compressedSize <= 0) return -1;
+
+    HRESULT hr;
+    IMFTransform* pDecoder = g_decoder.pDecoder;
+
+    // Create input sample
+    IMFMediaBuffer* pInputBuffer = NULL;
+    hr = MFCreateMemoryBuffer(compressedSize, &pInputBuffer);
+    if (FAILED(hr)) return -1;
+
+    BYTE* pData = NULL;
+    pInputBuffer->lpVtbl->Lock(pInputBuffer, &pData, NULL, NULL);
+    memcpy(pData, compressedData, compressedSize);
+    pInputBuffer->lpVtbl->Unlock(pInputBuffer);
+    pInputBuffer->lpVtbl->SetCurrentLength(pInputBuffer, compressedSize);
+
+    IMFSample* pInputSample = NULL;
+    MFCreateSample(&pInputSample);
+    pInputSample->lpVtbl->AddBuffer(pInputSample, pInputBuffer);
+
+    LONGLONG timestamp = g_decoder.frameIndex * 10000000LL / 30; // assume 30fps
+    pInputSample->lpVtbl->SetSampleTime(pInputSample, timestamp);
+    pInputSample->lpVtbl->SetSampleDuration(pInputSample, 10000000LL / 30);
+
+    // Feed to decoder
+    hr = pDecoder->lpVtbl->ProcessInput(pDecoder, 0, pInputSample, 0);
+    pInputSample->lpVtbl->Release(pInputSample);
+    pInputBuffer->lpVtbl->Release(pInputBuffer);
+
+    if (FAILED(hr)) {
+        if (g_decoder.frameIndex <= 3)
+            LOG("decodeVideoFrame: ProcessInput failed: 0x%08X\n", hr);
+        return -1;
+    }
+
+    // Try to get output
+    MFT_OUTPUT_DATA_BUFFER outputData = {0};
+    IMFMediaBuffer* pOutputBuffer = NULL;
+    IMFSample* pOutputSample = NULL;
+
+    // Check if decoder allocates its own samples
+    MFT_OUTPUT_STREAM_INFO streamInfo = {0};
+    pDecoder->lpVtbl->GetOutputStreamInfo(pDecoder, 0, &streamInfo);
+
+    if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+        // We need to provide output sample
+        hr = MFCreateMemoryBuffer(g_decoder.width * g_decoder.height * 4, &pOutputBuffer);
+        if (FAILED(hr)) return -1;
+
+        MFCreateSample(&pOutputSample);
+        pOutputSample->lpVtbl->AddBuffer(pOutputSample, pOutputBuffer);
+        outputData.pSample = pOutputSample;
+    }
+
+    DWORD status = 0;
+    hr = pDecoder->lpVtbl->ProcessOutput(pDecoder, 0, 1, &outputData, &status);
+
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        // Decoder needs more data (normal for B-frames or initial buffering)
+        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+        g_decoder.frameIndex++;
+        return 0; // not an error, just need more data
+    }
+
+    if (FAILED(hr)) {
+        if (g_decoder.frameIndex <= 3)
+            LOG("decodeVideoFrame: ProcessOutput failed: 0x%08X\n", hr);
+        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+        return -1;
+    }
+
+    // Got decoded frame! Extract raw data and convert to JPEG
+    IMFSample* pResultSample = outputData.pSample;
+    if (!pResultSample) {
+        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+        return -1;
+    }
+
+    IMFMediaBuffer* pResultBuffer = NULL;
+    pResultSample->lpVtbl->ConvertToContiguousBuffer(pResultSample, &pResultBuffer);
+
+    if (pResultBuffer) {
+        BYTE* rawData = NULL;
+        DWORD rawLen = 0;
+        pResultBuffer->lpVtbl->Lock(pResultBuffer, &rawData, NULL, &rawLen);
+
+        if (rawData && rawLen > 0) {
+            // Convert NV12/RGB to JPEG using WIC (reuse existing encode_to_jpeg logic)
+            // For simplicity, store raw data and let Flutter side handle it,
+            // or convert to JPEG here.
+            int w = g_decoder.width;
+            int h = g_decoder.height;
+
+            // NV12 → RGB conversion
+            int rgbSize = w * h * 3;
+            uint8_t* rgbBuf = (uint8_t*)malloc(rgbSize);
+            if (rgbBuf) {
+                // Simple NV12 to RGB24 conversion
+                const uint8_t* yPlane = rawData;
+                const uint8_t* uvPlane = rawData + w * h;
+                for (int row = 0; row < h; row++) {
+                    for (int col = 0; col < w; col++) {
+                        int y = yPlane[row * w + col];
+                        int u = uvPlane[(row/2) * w + (col & ~1)] - 128;
+                        int v = uvPlane[(row/2) * w + (col | 1)] - 128;
+                        int r = y + ((v * 359) >> 8);
+                        int g = y - ((u * 88 + v * 183) >> 8);
+                        int b = y + ((u * 454) >> 8);
+                        if (r < 0) r = 0; if (r > 255) r = 255;
+                        if (g < 0) g = 0; if (g > 255) g = 255;
+                        if (b < 0) b = 0; if (b > 255) b = 255;
+                        int idx = (row * w + col) * 3;
+                        rgbBuf[idx] = (uint8_t)r;
+                        rgbBuf[idx+1] = (uint8_t)g;
+                        rgbBuf[idx+2] = (uint8_t)b;
+                    }
+                }
+
+                // Encode RGB to JPEG using WIC
+                IWICImagingFactory* pFactory = NULL;
+                HRESULT jhr = CoCreateInstance(&CLSID_WICImagingFactory, NULL,
+                    CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void**)&pFactory);
+                if (SUCCEEDED(jhr)) {
+                    IStream* pStream = SHCreateMemStream(NULL, 0);
+                    if (pStream) {
+                        IWICBitmapEncoder* pEnc = NULL;
+                        jhr = pFactory->lpVtbl->CreateEncoder(pFactory, &GUID_ContainerFormatJpeg, NULL, &pEnc);
+                        if (SUCCEEDED(jhr)) {
+                            pEnc->lpVtbl->Initialize(pEnc, pStream, WICBitmapEncoderNoCache);
+                            IWICBitmapFrameEncode* pFrame = NULL;
+                            IPropertyBag2* pProps = NULL;
+                            pEnc->lpVtbl->CreateNewFrame(pEnc, &pFrame, &pProps);
+                            if (pFrame) {
+                                // Set quality
+                                PROPBAG2 opt = {0}; opt.pstrName = L"ImageQuality";
+                                VARIANT varQ; VariantInit(&varQ); varQ.vt = VT_R4; varQ.fltVal = 0.7f;
+                                pProps->lpVtbl->Write(pProps, 1, &opt, &varQ);
+                                pFrame->lpVtbl->Initialize(pFrame, pProps);
+                                pFrame->lpVtbl->SetSize(pFrame, w, h);
+                                WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppRGB;
+                                pFrame->lpVtbl->SetPixelFormat(pFrame, &fmt);
+                                pFrame->lpVtbl->WritePixels(pFrame, h, w * 3, rgbSize, rgbBuf);
+                                pFrame->lpVtbl->Commit(pFrame);
+                                pEnc->lpVtbl->Commit(pEnc);
+
+                                // Read JPEG from stream
+                                LARGE_INTEGER zero = {0};
+                                pStream->lpVtbl->Seek(pStream, zero, STREAM_SEEK_SET, NULL);
+                                STATSTG stat;
+                                pStream->lpVtbl->Stat(pStream, &stat, STATFLAG_NONAME);
+                                ULONG jpegLen = (ULONG)stat.cbSize.QuadPart;
+
+                                WaitForSingleObject(g_decoder.mutex, INFINITE);
+                                if (jpegLen <= 512 * 1024) {
+                                    pStream->lpVtbl->Read(pStream, g_decoder.outputBuffer, jpegLen, NULL);
+                                    g_decoder.outputSize = jpegLen;
+                                    g_decoder.frameReady = 1;
+                                }
+                                ReleaseMutex(g_decoder.mutex);
+
+                                pFrame->lpVtbl->Release(pFrame);
+                            }
+                            if (pProps) pProps->lpVtbl->Release(pProps);
+                            pEnc->lpVtbl->Release(pEnc);
+                        }
+                        pStream->lpVtbl->Release(pStream);
+                    }
+                    pFactory->lpVtbl->Release(pFactory);
+                }
+                free(rgbBuf);
+            }
+        }
+        pResultBuffer->lpVtbl->Unlock(pResultBuffer);
+        pResultBuffer->lpVtbl->Release(pResultBuffer);
+    }
+
+    if (pResultSample != pOutputSample && pResultSample)
+        pResultSample->lpVtbl->Release(pResultSample);
+    if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+    if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+
+    g_decoder.frameIndex++;
+    if (g_decoder.frameIndex <= 3 || g_decoder.frameIndex % 30 == 0) {
+        LOG("decodeVideoFrame: frame #%lld decoded, jpeg=%d bytes\n",
+            g_decoder.frameIndex, g_decoder.outputSize);
+    }
+    return 1; // success
+}
+
+/// Get latest decoded frame (JPEG)
+FFI_PLUGIN_EXPORT
+int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize) {
+    if (!g_decoder.initialized || !g_decoder.frameReady) return 0;
+
+    WaitForSingleObject(g_decoder.mutex, INFINITE);
+    int copied = 0;
+    if (g_decoder.frameReady && g_decoder.outputSize > 0 && g_decoder.outputSize <= maxSize) {
+        memcpy(outBuffer, g_decoder.outputBuffer, g_decoder.outputSize);
+        copied = g_decoder.outputSize;
+        g_decoder.frameReady = 0;
+    }
+    ReleaseMutex(g_decoder.mutex);
+    return copied;
+}
+
+/// Cleanup decoder
+FFI_PLUGIN_EXPORT
+void cleanupVideoDecoder(void) {
+    if (!g_decoder.initialized) return;
+
+    if (g_decoder.pDecoder) {
+        g_decoder.pDecoder->lpVtbl->ProcessMessage(g_decoder.pDecoder, MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        g_decoder.pDecoder->lpVtbl->ProcessMessage(g_decoder.pDecoder, MFT_MESSAGE_COMMAND_DRAIN, 0);
+        g_decoder.pDecoder->lpVtbl->Release(g_decoder.pDecoder);
+        g_decoder.pDecoder = NULL;
+    }
+    if (g_decoder.mutex) { CloseHandle(g_decoder.mutex); g_decoder.mutex = NULL; }
+    if (g_decoder.outputBuffer) { free(g_decoder.outputBuffer); g_decoder.outputBuffer = NULL; }
+    g_decoder.initialized = 0;
+    g_decoder.frameReady = 0;
+    g_decoder.outputSize = 0;
+    g_decoder.frameIndex = 0;
+    LOG("cleanupVideoDecoder: done\n", 0);
 }
