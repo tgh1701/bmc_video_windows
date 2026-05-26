@@ -123,8 +123,15 @@ void forceH265KeyFrame(void);
 // H.265/H.264 Video Decoder (for remote video)
 // ============================================================================
 
+/// Detect codec type from compressed NAL unit data (auto-detect like Android).
+/// Analyzes NAL header to determine H.265 vs H.264.
+/// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=unknown.
+FFI_PLUGIN_EXPORT
+int detectCodecType(const uint8_t* data, int size);
+
 /// Initialize video decoder.
 /// codecType: 1=H.265/HEVC, 2=H.264/AVC.
+/// If already initialized with a different codec, will auto-reinit.
 /// Returns 0 on success, -1 on failure.
 FFI_PLUGIN_EXPORT
 int initVideoDecoder(int width, int height, int codecType);

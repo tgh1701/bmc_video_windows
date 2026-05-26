@@ -27,16 +27,38 @@
 #pragma comment(lib, "shlwapi.lib")
 
 // ============================================================================
-// Logging
+// Logging — disabled by default. Define BMC_VIDEO_DEBUG to enable.
 // ============================================================================
+
+#ifdef BMC_VIDEO_DEBUG
 
 static char s_logFilePath[MAX_PATH] = {0};
 
 static void init_log_file(void) {
     if (s_logFilePath[0] == '\0') {
-        char tempDir[MAX_PATH];
-        GetTempPathA(MAX_PATH, tempDir);
-        sprintf_s(s_logFilePath, MAX_PATH, "%sbmc_video_debug.log", tempDir);
+        const char* projectLogDir = "d:\\BMC_Projects\\bmc_video_windows\\logs";
+        CreateDirectoryA(projectLogDir, NULL);
+
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        sprintf_s(s_logFilePath, MAX_PATH,
+            "%s\\native_%04d%02d%02d_%02d%02d%02d.log",
+            projectLogDir,
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond);
+
+        FILE* test = fopen(s_logFilePath, "a");
+        if (test) {
+            fclose(test);
+        } else {
+            char tempDir[MAX_PATH];
+            GetTempPathA(MAX_PATH, tempDir);
+            sprintf_s(s_logFilePath, MAX_PATH,
+                "%sbmc_video_native_%04d%02d%02d_%02d%02d%02d.log",
+                tempDir,
+                st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond);
+        }
     }
 }
 
@@ -44,7 +66,6 @@ static void log_to_file(const char* msg) {
     init_log_file();
     FILE* f = fopen(s_logFilePath, "a");
     if (f) {
-        // Timestamp
         SYSTEMTIME st;
         GetLocalTime(&st);
         fprintf(f, "[%02d:%02d:%02d.%03d] %s",
@@ -60,6 +81,11 @@ static void log_to_file(const char* msg) {
     OutputDebugStringA(buf); \
     log_to_file(buf); \
 }
+
+#else
+// Release: LOG is a no-op
+#define LOG(fmt, ...) ((void)0)
+#endif
 
 // ============================================================================
 // GUIDs (manually defined to avoid linker issues with Flutter's build system)
@@ -247,6 +273,24 @@ static const GUID MY_CODECAPI_AVEncVideoForceKeyFrame = {
     {0x9e, 0xf2, 0x8f, 0x26, 0x5d, 0x26, 0x03, 0x45}
 };
 
+// CODECAPI_AVEncCommonQuality = {FCBF57A3-7EA5-4B0C-9644-69B40C39C391}
+static const GUID MY_CODECAPI_AVEncCommonQuality = {
+    0xfcbf57a3, 0x7ea5, 0x4b0c,
+    {0x96, 0x44, 0x69, 0xb4, 0x0c, 0x39, 0xc3, 0x91}
+};
+
+// CODECAPI_AVEncMPVDefaultBPictureCount = {8D390ACA-943E-4B14-91B6-288B6E55B490}
+static const GUID MY_CODECAPI_AVEncMPVDefaultBPictureCount = {
+    0x8d390aca, 0x943e, 0x4b14,
+    {0x91, 0xb6, 0x28, 0x8b, 0x6e, 0x55, 0xb4, 0x90}
+};
+
+// MF_MT_MAX_KEYFRAME_SPACING = {C16EB52B-73A1-476F-8D62-839D6A020652}
+static const GUID MY_MF_MT_MAX_KEYFRAME_SPACING = {
+    0xc16eb52b, 0x73a1, 0x476f,
+    {0x8d, 0x62, 0x83, 0x9d, 0x6a, 0x02, 0x06, 0x52}
+};
+
 // MFSampleExtension_CleanPoint = {9CDF01D8-A0F0-43BA-B077-EAA06CBD728A}
 static const GUID MY_MFSampleExtension_CleanPoint = {
     0x9cdf01d8, 0xa0f0, 0x43ba,
@@ -272,10 +316,12 @@ typedef struct CaptureState {
     HANDLE threadHandle;
     HANDLE frameMutex;
 
-    // Latest JPEG frame buffer
-    uint8_t* jpegBuffer;
-    int jpegSize;
+    // Latest raw BGRA frame buffer for local preview (no JPEG encoding needed!)
+    uint8_t* rawBgraBuffer;
+    int rawBgraSize;
     volatile int frameReady;
+    int bgraWidth;
+    int bgraHeight;
 
     // Device index
     int deviceIndex;
@@ -293,9 +339,32 @@ typedef struct CaptureState {
     GUID h265InputSubtype;       // NV12 or YUY2
     volatile int h265ForceKey;   // 1 = force next frame to be I-frame
     LONGLONG h265FrameIndex;     // Frame counter for timestamps
+    DWORD startTimeMs;           // FIX: GetTickCount() when capture started
+    // Auto-detect flush support: -1=unknown, 0=not supported, 1=supported
+    int flushSupported;
 } CaptureState;
 
 static CaptureState g_capture = {0};
+
+// ============================================================================
+// Cached WIC Factory (reuse across frames for performance - FIX BUG #9)
+// ============================================================================
+
+static IWICImagingFactory* g_pWICFactory = NULL;
+
+static IWICImagingFactory* get_wic_factory(void) {
+    if (!g_pWICFactory) {
+        HRESULT hr = CoCreateInstance(
+            &MY_CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+            &MY_IID_IWICImagingFactory, (void**)&g_pWICFactory);
+        if (FAILED(hr)) {
+            LOG("get_wic_factory: CoCreateInstance failed: 0x%08X\n", hr);
+            return NULL;
+        }
+        LOG("get_wic_factory: Created and cached WIC factory\n", 0);
+    }
+    return g_pWICFactory;
+}
 
 // ============================================================================
 // Decoder State (for decoding received remote video)
@@ -309,12 +378,15 @@ typedef struct DecoderState {
     int initialized;
     int outputIsNV12;            // 1=NV12 output, 0=RGB32 output
 
-    // Decoded output buffer (JPEG for Flutter display)
+    // Decoded output buffer (raw BGRA pixels for Flutter display)
     HANDLE mutex;
-    uint8_t* outputBuffer;       // JPEG encoded decoded frame
-    int outputSize;
+    uint8_t* outputBuffer;       // Raw BGRA pixel data (width * height * 4)
+    int outputSize;              // Size of pixel data in bytes
     volatile int frameReady;
     LONGLONG frameIndex;
+
+    // COM/MF lifecycle tracking
+    int shouldUninitCOM;         // 1 if we initialized COM and need to uninit
 } DecoderState;
 
 static DecoderState g_decoder = {0};
@@ -629,6 +701,7 @@ static int encode_rgb_to_jpeg(
     IPropertyBag2* pPropertyBag = NULL;
     IStream* pStream = NULL;
     int result = 0;
+    int factoryIsCached = 0;  // track whether factory is cached (don't release)
 
     HRESULT hr;
 
@@ -639,13 +712,19 @@ static int encode_rgb_to_jpeg(
         return 0;
     }
 
-    // Create WIC factory
-    hr = CoCreateInstance(
-        &MY_CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-        &MY_IID_IWICImagingFactory, (void**)&pFactory);
-    if (FAILED(hr)) {
-        LOG("CoCreateInstance WICImagingFactory failed: 0x%08X\n", hr);
-        goto cleanup;
+    // Use cached WIC factory (FIX BUG #9)
+    pFactory = get_wic_factory();
+    if (!pFactory) {
+        // Fallback: create new factory
+        hr = CoCreateInstance(
+            &MY_CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+            &MY_IID_IWICImagingFactory, (void**)&pFactory);
+        if (FAILED(hr)) {
+            LOG("CoCreateInstance WICImagingFactory failed: 0x%08X\n", hr);
+            goto cleanup;
+        }
+    } else {
+        factoryIsCached = 1;
     }
 
     // Create JPEG encoder
@@ -763,7 +842,7 @@ cleanup:
     if (pFrame) pFrame->lpVtbl->Release(pFrame);
     if (pPropertyBag) pPropertyBag->lpVtbl->Release(pPropertyBag);
     if (pEncoder) pEncoder->lpVtbl->Release(pEncoder);
-    if (pFactory) pFactory->lpVtbl->Release(pFactory);
+    if (pFactory && !factoryIsCached) pFactory->lpVtbl->Release(pFactory);
     if (pStream) pStream->lpVtbl->Release(pStream);
 
     return result;
@@ -774,11 +853,14 @@ cleanup:
 // ============================================================================
 
 /// Calculate auto bitrate based on resolution
+/// Auto bitrate matching Android: w*h*6 for HEVC, w*h*10 for H264
+/// Android: Math.max(w * h * 6, MIN_BITRATE=500000) for H265
 static int auto_bitrate(int width, int height) {
     int pixels = width * height;
-    if (pixels >= 1920 * 1080) return 3000000;  // 3 Mbps for 1080p
-    if (pixels >= 1280 * 720)  return 1500000;  // 1.5 Mbps for 720p
-    return 500000;                               // 500 Kbps for 480p and below
+    int bitrate = pixels * 6; // Match Android H265 formula
+    if (bitrate < 500000) bitrate = 500000; // Min 500kbps (Android VideoConfig.MIN_BITRATE)
+    if (bitrate > 8000000) bitrate = 8000000; // Max 8Mbps
+    return bitrate;
 }
 
 /// Pack two UINT32 into UINT64 for MF_MT_FRAME_SIZE / MF_MT_FRAME_RATE
@@ -793,163 +875,167 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
     HRESULT hr;
     IMFActivate** ppActivate = NULL;
     UINT32 count = 0;
-    const GUID* codecSubtype = &MY_MFVideoFormat_HEVC;
-    int codecType = 1; // 1=H265
 
     if (bitrate <= 0) bitrate = auto_bitrate(width, height);
 
-    LOG("init_video_encoder: %dx%d@%dfps, bitrate=%d, trying H.265...\n", width, height, fps, bitrate);
+    LOG("init_video_encoder: %dx%d@%dfps, bitrate=%d\n", width, height, fps, bitrate);
 
-    // Try H.265 first
-    MFT_REGISTER_TYPE_INFO outputInfo = {0};
-    memcpy(&outputInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
-    memcpy(&outputInfo.guidSubtype, &MY_MFVideoFormat_HEVC, sizeof(GUID));
+    // MFT enum flags: include ASYNC + SYNC + HARDWARE + SOFTWARE
+    const DWORD enumFlags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                            MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_HARDWARE |
+                            MFT_ENUM_FLAG_SORTANDFILTER;
 
-    hr = MFTEnumEx(
-        MFT_CATEGORY_VIDEO_ENCODER,
-        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
-        NULL, &outputInfo, &ppActivate, &count);
+    // Try codecs in order: H.265 then H.264
+    struct { const GUID* subtype; int type; const char* name; } codecs[] = {
+        { &MY_MFVideoFormat_HEVC, 1, "H.265" },
+        { &MY_MFVideoFormat_H264, 2, "H.264" },
+    };
 
-    if (FAILED(hr) || count == 0) {
-        LOG("init_video_encoder: No H.265 encoder, trying H.264...\n", 0);
-        if (ppActivate) CoTaskMemFree(ppActivate);
+    // Try input formats in order
+    struct { const GUID* subtype; const char* name; } inputs[] = {
+        { &MY_MFVideoFormat_NV12, "NV12" },
+        { &MY_MFVideoFormat_YUY2, "YUY2" },
+        { &MY_MFVideoFormat_RGB32, "RGB32" },
+    };
+
+    for (int ci = 0; ci < 2; ci++) {
+        MFT_REGISTER_TYPE_INFO outputInfo = {0};
+        memcpy(&outputInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
+        memcpy(&outputInfo.guidSubtype, codecs[ci].subtype, sizeof(GUID));
+
         ppActivate = NULL;
         count = 0;
-
-        // Fallback to H.264
-        memcpy(&outputInfo.guidSubtype, &MY_MFVideoFormat_H264, sizeof(GUID));
-        codecSubtype = &MY_MFVideoFormat_H264;
-        codecType = 2; // 2=H264
-
-        hr = MFTEnumEx(
-            MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
-            NULL, &outputInfo, &ppActivate, &count);
+        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &outputInfo, &ppActivate, &count);
 
         if (FAILED(hr) || count == 0) {
-            LOG("init_video_encoder: No H.264 encoder either, giving up\n", 0);
+            LOG("init_video_encoder: No %s encoder found\n", codecs[ci].name);
             if (ppActivate) CoTaskMemFree(ppActivate);
-            return -1;
+            continue; // try next codec
         }
-    }
 
-    LOG("init_video_encoder: Found %u encoders, codec=%s\n", count, codecType == 1 ? "H265" : "H264");
+        LOG("init_video_encoder: Found %u %s encoders\n", count, codecs[ci].name);
 
-    // Activate the first encoder
-    IMFTransform* pEncoder = NULL;
-    hr = ppActivate[0]->lpVtbl->ActivateObject(ppActivate[0], &MY_IID_IMFTransform, (void**)&pEncoder);
-    for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
-    CoTaskMemFree(ppActivate);
-
-    if (FAILED(hr) || !pEncoder) {
-        LOG("init_video_encoder: ActivateObject failed: 0x%08X\n", hr);
-        return -1;
-    }
-
-    // ===== Set OUTPUT type FIRST (required by MFT) =====
-    IMFMediaType* pOutputType = NULL;
-    MFCreateMediaType(&pOutputType);
-    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
-    pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, codecSubtype);
-    my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
-    my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, fps, 1);
-    pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_AVG_BITRATE, (UINT32)bitrate);
-    pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_INTERLACE_MODE, 2); // MFVideoInterlace_Progressive
-
-    hr = pEncoder->lpVtbl->SetOutputType(pEncoder, 0, pOutputType, 0);
-    pOutputType->lpVtbl->Release(pOutputType);
-    if (FAILED(hr)) {
-        LOG("init_video_encoder: SetOutputType failed: 0x%08X\n", hr);
-        pEncoder->lpVtbl->Release(pEncoder);
-        return -1;
-    }
-
-    // ===== Set INPUT type =====
-    IMFMediaType* pInputType = NULL;
-    MFCreateMediaType(&pInputType);
-    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
-    pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &inputSubtype);
-    my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
-    my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
-    pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
-
-    hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
-    pInputType->lpVtbl->Release(pInputType);
-    if (FAILED(hr)) {
-        LOG("init_video_encoder: SetInputType failed: 0x%08X (subtype may not be supported)\n", hr);
-        // Try NV12 as alternative input
-        if (!IsEqualGUID(&inputSubtype, &MY_MFVideoFormat_NV12)) {
-            LOG("init_video_encoder: Retrying with NV12 input...\n", 0);
-            MFCreateMediaType(&pInputType);
-            pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
-            pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, &MY_MFVideoFormat_NV12);
-            my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
-            my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
-            pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
-            hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
-            pInputType->lpVtbl->Release(pInputType);
-            if (FAILED(hr)) {
-                LOG("init_video_encoder: NV12 input also failed: 0x%08X\n", hr);
-                pEncoder->lpVtbl->Release(pEncoder);
-                return -1;
+        // Try each encoder instance
+        for (UINT32 ei = 0; ei < count; ei++) {
+            IMFTransform* pEncoder = NULL;
+            hr = ppActivate[ei]->lpVtbl->ActivateObject(ppActivate[ei], &MY_IID_IMFTransform, (void**)&pEncoder);
+            if (FAILED(hr) || !pEncoder) {
+                LOG("init_video_encoder: ActivateObject[%u] failed: 0x%08X\n", ei, hr);
+                continue;
             }
-            memcpy(&state->h265InputSubtype, &MY_MFVideoFormat_NV12, sizeof(GUID));
-        } else {
-            pEncoder->lpVtbl->Release(pEncoder);
-            return -1;
+
+            // Set OUTPUT type first
+            IMFMediaType* pOutputType = NULL;
+            MFCreateMediaType(&pOutputType);
+            pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+            pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, codecs[ci].subtype);
+            my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, width, height);
+            my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+            pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_AVG_BITRATE, (UINT32)bitrate);
+            pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_INTERLACE_MODE, 2);
+            pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_MAX_KEYFRAME_SPACING, (UINT32)(fps / 2));
+
+            hr = pEncoder->lpVtbl->SetOutputType(pEncoder, 0, pOutputType, 0);
+            pOutputType->lpVtbl->Release(pOutputType);
+            if (FAILED(hr)) {
+                LOG("init_video_encoder: SetOutputType failed: 0x%08X\n", hr);
+                pEncoder->lpVtbl->Release(pEncoder);
+                continue;
+            }
+
+            // Try each input format
+            int inputOk = 0;
+            GUID usedInput = {0};
+            for (int ii = 0; ii < 3; ii++) {
+                IMFMediaType* pInputType = NULL;
+                MFCreateMediaType(&pInputType);
+                pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+                pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, inputs[ii].subtype);
+                my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, width, height);
+                my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, fps, 1);
+                pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
+
+                hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
+                pInputType->lpVtbl->Release(pInputType);
+                if (SUCCEEDED(hr)) {
+                    LOG("init_video_encoder: Input %s accepted!\n", inputs[ii].name);
+                    memcpy(&usedInput, inputs[ii].subtype, sizeof(GUID));
+                    inputOk = 1;
+                    break;
+                }
+                LOG("init_video_encoder: Input %s rejected: 0x%08X\n", inputs[ii].name, hr);
+            }
+
+            if (!inputOk) {
+                pEncoder->lpVtbl->Release(pEncoder);
+                continue;
+            }
+
+            // Configure ICodecAPI
+            ICodecAPI* pCodecAPI = NULL;
+            hr = pEncoder->lpVtbl->QueryInterface(pEncoder, &MY_IID_ICodecAPI, (void**)&pCodecAPI);
+            if (SUCCEEDED(hr) && pCodecAPI) {
+                VARIANT var;
+                VariantInit(&var);
+                // CBR mode — matching Android BITRATE_MODE_CBR
+                var.vt = VT_UI4;
+                var.ulVal = 0; // 0=CBR (matches Android)
+                hr = pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncCommonRateControlMode, &var);
+                if (FAILED(hr)) {
+                    LOG("init_video_encoder: CBR not supported: 0x%08X\n", hr);
+                }
+                var.vt = VT_UI4;
+                var.ulVal = 0; // B-frames = 0 (matching Android)
+                hr = pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncMPVDefaultBPictureCount, &var);
+                if (SUCCEEDED(hr)) { LOG("init_video_encoder: B-frames disabled\n", 0); }
+                var.vt = VT_UI4;
+                var.ulVal = (UINT32)fps; // GOP=fps → 1 keyframe per second (matching Android KEY_I_FRAME_INTERVAL=1)
+                pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncMPVGOPSize, &var);
+                var.vt = VT_BOOL;
+                var.boolVal = VARIANT_TRUE;
+                pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVLowLatencyMode, &var);
+                LOG("init_video_encoder: ICodecAPI configured (CBR, B=0, GOP=%d, bitrate=%d, low_latency)\n", fps, bitrate);
+            }
+
+            // Start streaming
+            hr = pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+            if (FAILED(hr)) { LOG("init_video_encoder: BEGIN_STREAMING failed: 0x%08X\n", hr); }
+            pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+            // Store in state
+            state->pEncoder = pEncoder;
+            state->pCodecAPI = pCodecAPI;
+            state->h265Active = 1;
+            state->h265CodecType = codecs[ci].type;
+            state->h265Bitrate = bitrate;
+            state->h265FrameIndex = 0;
+            state->flushSupported = -1; // Unknown, will auto-detect
+            memcpy(&state->h265InputSubtype, &usedInput, sizeof(GUID));
+            state->h265Buffer = (uint8_t*)malloc(1024 * 1024);
+            state->h265Size = 0;
+            state->h265Ready = 0;
+            state->h265IsKeyFrame = 0;
+            state->h265ForceKey = 1;
+
+            // Cleanup activates
+            for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+            CoTaskMemFree(ppActivate);
+
+            LOG("init_video_encoder: SUCCESS! codec=%s, bitrate=%d, input=%s\n",
+                codecs[ci].name, bitrate,
+                IsEqualGUID(&usedInput, &MY_MFVideoFormat_NV12) ? "NV12" :
+                IsEqualGUID(&usedInput, &MY_MFVideoFormat_YUY2) ? "YUY2" : "RGB32");
+            return 0;
         }
-    } else {
-        memcpy(&state->h265InputSubtype, &inputSubtype, sizeof(GUID));
+
+        // Cleanup activates for this codec
+        for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+        CoTaskMemFree(ppActivate);
+        LOG("init_video_encoder: All %s encoders failed, trying next codec...\n", codecs[ci].name);
     }
 
-    // ===== Configure via ICodecAPI =====
-    ICodecAPI* pCodecAPI = NULL;
-    hr = pEncoder->lpVtbl->QueryInterface(pEncoder, &MY_IID_ICodecAPI, (void**)&pCodecAPI);
-    if (SUCCEEDED(hr) && pCodecAPI) {
-        VARIANT var;
-        VariantInit(&var);
-
-        // CBR rate control
-        var.vt = VT_UI4;
-        var.ulVal = 0; // eAVEncCommonRateControlMode_CBR
-        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncCommonRateControlMode, &var);
-
-        // GOP size (keyframe interval = 2 seconds)
-        var.vt = VT_UI4;
-        var.ulVal = fps * 2;
-        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVEncMPVGOPSize, &var);
-
-        // Low latency mode (critical for real-time video call)
-        var.vt = VT_BOOL;
-        var.boolVal = VARIANT_TRUE;
-        pCodecAPI->lpVtbl->SetValue(pCodecAPI, &MY_CODECAPI_AVLowLatencyMode, &var);
-
-        LOG("init_video_encoder: ICodecAPI configured (CBR, GOP=%d, low_latency)\n", fps * 2);
-    }
-
-    // Notify encoder to start streaming
-    hr = pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-    if (FAILED(hr)) {
-        LOG("init_video_encoder: BEGIN_STREAMING failed: 0x%08X\n", hr);
-    }
-    hr = pEncoder->lpVtbl->ProcessMessage(pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-
-    // Store in state
-    state->pEncoder = pEncoder;
-    state->pCodecAPI = pCodecAPI;
-    state->h265Active = 1;
-    state->h265CodecType = codecType;
-    state->h265Bitrate = bitrate;
-    state->h265FrameIndex = 0;
-    state->h265Buffer = (uint8_t*)malloc(512 * 1024); // 512KB for compressed output
-    state->h265Size = 0;
-    state->h265Ready = 0;
-    state->h265IsKeyFrame = 0;
-    state->h265ForceKey = 0;
-
-    LOG("init_video_encoder: SUCCESS! codec=%s, bitrate=%d\n",
-        codecType == 1 ? "H.265/HEVC" : "H.264/AVC", bitrate);
-    return 0;
+    LOG("init_video_encoder: No working encoder found!\n", 0);
+    return -1;
 }
 
 /// Encode one raw frame via MFT. Outputs to state->h265Buffer.
@@ -958,16 +1044,20 @@ static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSi
 
     HRESULT hr;
 
-    // Force keyframe if requested
-    if (state->h265ForceKey && state->pCodecAPI) {
-        VARIANT var;
-        VariantInit(&var);
-        var.vt = VT_UI4;
-        var.ulVal = 1;
-        state->pCodecAPI->lpVtbl->SetValue(state->pCodecAPI, &MY_CODECAPI_AVEncVideoForceKeyFrame, &var);
-        state->h265ForceKey = 0;
-        LOG("encode_video_frame: Forced keyframe\n", 0);
+    // =========================================================================
+    // AUTO-DETECT: Try flush-per-frame on first frame to check if encoder
+    // supports it. Flush forces ALL-INTRA (every frame is I-frame = sharp).
+    // Some encoders don't produce output after flush (they buffer internally).
+    // For those, fall back to standard encoding with P-frames.
+    // =========================================================================
+
+    if (state->flushSupported != 0) {
+        // flushSupported is -1 (unknown) or 1 (confirmed working) → try flush before input
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_COMMAND_FLUSH, 0);
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     }
+    // flushSupported==0: DRAIN mode — no flush before, DRAIN after ProcessOutput
 
     // Create input buffer
     IMFMediaBuffer* pInBuffer = NULL;
@@ -1025,10 +1115,44 @@ static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSi
     DWORD status = 0;
     hr = state->pEncoder->lpVtbl->ProcessOutput(state->pEncoder, 0, 1, &outputData, &status);
 
-    if (hr == ((HRESULT)0xC00D6D72L)) { // MF_E_TRANSFORM_NEED_MORE_INPUT
-        // Encoder needs more frames before producing output (normal for first few frames)
-        if (pOutSample) pOutSample->lpVtbl->Release(pOutSample);
-        return 0;
+    #ifndef MF_E_TRANSFORM_NEED_MORE_INPUT
+    #define MF_E_TRANSFORM_NEED_MORE_INPUT ((HRESULT)0xC00D6D72L)
+    #endif
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        if (state->flushSupported == -1) {
+            // First frame: flush didn't produce output → this encoder buffers internally
+            state->flushSupported = 0;
+            LOG("encode: flush-per-frame NOT supported, switching to DRAIN mode\n", 0);
+        }
+
+        // DRAIN mode: tell encoder "no more input" → forces it to output buffered frame
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_COMMAND_DRAIN, 0);
+
+        // Retry ProcessOutput after drain
+        hr = state->pEncoder->lpVtbl->ProcessOutput(state->pEncoder, 0, 1, &outputData, &status);
+
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT || FAILED(hr)) {
+            // Still nothing — truly no output available (only happens on frame 0)
+            if (pOutSample) pOutSample->lpVtbl->Release(pOutSample);
+            // Reset encoder for next frame
+            state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_COMMAND_FLUSH, 0);
+            state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+            state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+            return 0;
+        }
+
+        // Got output after drain! Reset encoder so next frame has no reference = I-frame
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_COMMAND_FLUSH, 0);
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        state->pEncoder->lpVtbl->ProcessMessage(state->pEncoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        // Fall through to extract output
+    }
+
+    // ProcessOutput succeeded
+    if (state->flushSupported == -1) {
+        // First frame: flush produced output → this encoder supports flush!
+        state->flushSupported = 1;
+        LOG("encode: flush-per-frame SUPPORTED! Using ALL-INTRA mode (sharp motion)\n", 0);
     }
 
     if (FAILED(hr)) {
@@ -1051,26 +1175,47 @@ static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSi
 
             if (pEncData && encLen > 0 && state->h265Buffer) {
                 int copyLen = (int)encLen;
-                if (copyLen > 512 * 1024) copyLen = 512 * 1024;
+                if (copyLen > 1024 * 1024) copyLen = 1024 * 1024; // Match malloc size
 
                 WaitForSingleObject(state->frameMutex, INFINITE);
                 memcpy(state->h265Buffer, pEncData, copyLen);
                 state->h265Size = copyLen;
                 state->h265Ready = 1;
 
-                // Check if keyframe
+                // Check if keyframe via MFSampleExtension_CleanPoint
                 UINT32 isCleanPoint = 0;
-                IMFAttributes* pSampleAttrs = NULL;
-                hr = pResultSample->lpVtbl->QueryInterface(pResultSample, &IID_IMFAttributes, (void**)&pSampleAttrs);
-                if (SUCCEEDED(hr) && pSampleAttrs) {
-                    pSampleAttrs->lpVtbl->GetUINT32(pSampleAttrs, &MY_MFSampleExtension_CleanPoint, &isCleanPoint);
-                    pSampleAttrs->lpVtbl->Release(pSampleAttrs);
+                pResultSample->lpVtbl->GetUINT32(pResultSample, &MY_MFSampleExtension_CleanPoint, &isCleanPoint);
+                
+                // Fallback: parse NAL type if CleanPoint not set
+                if (!isCleanPoint && pEncData && encLen > 4) {
+                    // Find first NAL unit (skip 00 00 00 01 or 00 00 01)
+                    for (DWORD i = 0; i < encLen - 4; i++) {
+                        if (pEncData[i] == 0 && pEncData[i+1] == 0 && pEncData[i+2] == 0 && pEncData[i+3] == 1) {
+                            uint8_t nalByte = pEncData[i+4];
+                            if (state->h265CodecType == 2) {
+                                // H.264: NAL type = nalByte & 0x1F, type 5 = IDR
+                                int nalType = nalByte & 0x1F;
+                                if (nalType == 5 || nalType == 7) { // IDR or SPS
+                                    isCleanPoint = 1;
+                                }
+                            } else {
+                                // H.265: NAL type = (nalByte >> 1) & 0x3F, types 19/20 = IDR
+                                int nalType = (nalByte >> 1) & 0x3F;
+                                if (nalType == 19 || nalType == 20 || nalType == 32) { // IDR or VPS
+                                    isCleanPoint = 1;
+                                }
+                            }
+                            break;
+                        }
+                    }
                 }
+                
                 state->h265IsKeyFrame = isCleanPoint ? 1 : 0;
                 ReleaseMutex(state->frameMutex);
 
-                if (state->h265FrameIndex <= 3 || state->h265FrameIndex % 30 == 0) {
-                    LOG("encode_video_frame: frame #%lld, encoded=%d bytes, keyframe=%d\n",
+                // Log every 10 frames for detailed bitrate analysis
+                if (state->h265FrameIndex <= 5 || state->h265FrameIndex % 10 == 0) {
+                    LOG("encode: frame #%lld, size=%d bytes, key=%d\n",
                         state->h265FrameIndex, copyLen, state->h265IsKeyFrame);
                 }
             }
@@ -1351,14 +1496,15 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
     // ========================================================================
     // Step 3.5: Initialize H.265/H.264 encoder
     // ========================================================================
+    // FIX BUG #3: Always use NV12 as encoder input format
+    // When useNativeFormat=1: camera outputs YUY2/NV12, we detect and feed directly
+    // When useNativeFormat=0: camera outputs RGB, we convert RGB→NV12 before encoding
+    GUID nativeSubtype = MY_MFVideoFormat_NV12; // always NV12
+    if (useNativeFormat) {
+        // If camera outputs YUY2, encoder will try YUY2 first then fallback to NV12
+        nativeSubtype = MY_MFVideoFormat_YUY2;
+    }
     {
-        // Determine native format for encoder input
-        GUID nativeSubtype = MY_MFVideoFormat_NV12; // default
-        if (useNativeFormat) {
-            DWORD expectedYUY2 = (DWORD)(actualWidth * actualHeight * 2);
-            // We'll detect actual format in the first frame, use YUY2 as likely default
-            nativeSubtype = MY_MFVideoFormat_YUY2;
-        }
         int encResult = init_video_encoder(state, actualWidth, actualHeight, state->fps, nativeSubtype, 0);
         if (encResult != 0) {
             LOG("capture_thread: H.265/H.264 encoder not available, JPEG only\n", 0);
@@ -1399,9 +1545,98 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                 DWORD maxLen = 0, curLen = 0;
                 hr = pBuffer->lpVtbl->Lock(pBuffer, &pBits, &maxLen, &curLen);
                 if (SUCCEEDED(hr) && pBits && curLen > 0) {
-                    // === H.265/H.264 encode (raw YUV data before RGB conversion) ===
-                    if (state->h265Active && useNativeFormat) {
-                        encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
+                    // === H.265/H.264 encode ===
+                    // FIX BUG #3: Encode video in BOTH native format AND RGB output modes
+                    // NOTE: Keyframe forcing removed — ICodecAPI is ignored by hardware,
+                    // and FLUSH+RESTART reduces quality. Encoder produces keyframes naturally.
+                    if (state->h265Active) {
+                        if (useNativeFormat) {
+                            // Check if encoder input format matches camera format
+                            if (IsEqualGUID(&state->h265InputSubtype, &nativeSubtype)) {
+                                // Same format — feed directly
+                                encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
+                            } else {
+                                // Need conversion: camera=YUY2, encoder=NV12 (most common case)
+                                int nv12Size = actualWidth * actualHeight * 3 / 2;
+                                uint8_t* nv12Buf = (uint8_t*)malloc(nv12Size);
+                                if (nv12Buf) {
+                                    uint8_t* yPlane = nv12Buf;
+                                    uint8_t* uvPlane = nv12Buf + actualWidth * actualHeight;
+                                    
+                                    // YUY2: [Y0 U0 Y1 V0] [Y2 U2 Y3 V2] ...
+                                    // → NV12: Y plane + UV interleaved
+                                    for (int row = 0; row < actualHeight; row++) {
+                                        const uint8_t* srcRow = pBits + row * actualWidth * 2;
+                                        uint8_t* yRow = yPlane + row * actualWidth;
+                                        
+                                        for (int col = 0; col < actualWidth; col += 2) {
+                                            int si = col * 2;
+                                            yRow[col]     = srcRow[si];     // Y0
+                                            yRow[col + 1] = srcRow[si + 2]; // Y1
+                                            
+                                            // UV: subsample vertically (every other row)
+                                            if ((row & 1) == 0) {
+                                                int uvIdx = (row / 2) * actualWidth + col;
+                                                uvPlane[uvIdx]     = srcRow[si + 1]; // U
+                                                uvPlane[uvIdx + 1] = srcRow[si + 3]; // V
+                                            }
+                                        }
+                                    }
+                                    encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
+                                    free(nv12Buf);
+                                    if (frameCount == 0) {
+                                        LOG("capture_thread: YUY2->NV12 conversion for encoder\n", 0);
+                                    }
+                                }
+                            }
+                        } else {
+                            // RGB output — convert to NV12 first, then encode
+                            // RGB32: 4 bytes/pixel, RGB24: 3 bytes/pixel
+                            int bpp = (curLen >= (DWORD)(actualWidth * actualHeight * 4)) ? 4 : 3;
+                            int nv12Size = actualWidth * actualHeight * 3 / 2;
+                            uint8_t* nv12Buf = (uint8_t*)malloc(nv12Size);
+                            if (nv12Buf) {
+                                // MF RGB is bottom-up, so row 0 in buffer = bottom of image
+                                // NV12: Y plane (w*h) + UV interleaved plane (w*h/2)
+                                uint8_t* yPlane = nv12Buf;
+                                uint8_t* uvPlane = nv12Buf + actualWidth * actualHeight;
+                                int stride = (bpp == 4) ? actualWidth * 4 : ((actualWidth * 3 + 3) & ~3);
+
+                                for (int row = 0; row < actualHeight; row++) {
+                                    // MF bottom-up: row 0 in memory = bottom of image
+                                    // NV12 is top-down: row 0 = top
+                                    const uint8_t* srcRow = pBits + (actualHeight - 1 - row) * stride;
+                                    for (int col = 0; col < actualWidth; col++) {
+                                        int srcIdx = col * bpp;
+                                        uint8_t B = srcRow[srcIdx + 0];
+                                        uint8_t G = srcRow[srcIdx + 1];
+                                        uint8_t R = srcRow[srcIdx + 2];
+
+                                        // RGB → Y
+                                        int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+                                        if (Y < 16) Y = 16; if (Y > 235) Y = 235;
+                                        yPlane[row * actualWidth + col] = (uint8_t)Y;
+
+                                        // UV: subsample 2x2
+                                        if ((row & 1) == 0 && (col & 1) == 0) {
+                                            int U = ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
+                                            int V = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
+                                            if (U < 0) U = 0; if (U > 255) U = 255;
+                                            if (V < 0) V = 0; if (V > 255) V = 255;
+                                            int uvRow = row / 2;
+                                            int uvIdx = uvRow * actualWidth + (col & ~1);
+                                            uvPlane[uvIdx] = (uint8_t)U;
+                                            uvPlane[uvIdx + 1] = (uint8_t)V;
+                                        }
+                                    }
+                                }
+                                encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
+                                free(nv12Buf);
+                                if (frameCount == 0) {
+                                    LOG("capture_thread: RGB%d->NV12 conversion for encoder (curLen=%u)\n", bpp*8, curLen);
+                                }
+                            }
+                        }
                     }
 
                     BYTE* rgbData = pBits;
@@ -1494,35 +1729,83 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                         }
                     }
 
-                    // Encode to JPEG
-                    int jpegLen = encode_rgb_to_jpeg(
-                        rgbData, rgbWidth, rgbHeight,
-                        state->jpegQuality, tempJpeg, jpegBufSize);
-
-                    if (jpegLen > 0) {
-                        frameCount++;
-                        if (frameCount == 1) {
-                            LOG("capture_thread: FIRST FRAME! jpegLen=%d\n", jpegLen);
-                        }
-                        if (frameCount % 30 == 0) {
-                            LOG("capture_thread: frame #%d, jpegLen=%d\n", frameCount, jpegLen);
-                        }
-                        // Copy to shared buffer
+                    // === Copy raw BGRA pixels for local preview (no JPEG encode!) ===
+                    // MF RGB is bottom-up, Flutter needs top-down BGRA
+                    {
+                        int bpp = (curLen >= (DWORD)(rgbWidth * rgbHeight * 4)) ? 4 : 3;
+                        int bgraSize = rgbWidth * rgbHeight * 4;
+                        
                         WaitForSingleObject(state->frameMutex, INFINITE);
-                        if (state->jpegBuffer == NULL || jpegLen > jpegBufSize) {
-                            free(state->jpegBuffer);
-                            state->jpegBuffer = (uint8_t*)malloc(jpegBufSize);
+                        
+                        // Allocate/reallocate BGRA buffer if needed
+                        if (state->rawBgraBuffer == NULL || bgraSize > state->rawBgraSize) {
+                            free(state->rawBgraBuffer);
+                            state->rawBgraBuffer = (uint8_t*)malloc(bgraSize);
+                            state->rawBgraSize = 0;
                         }
-                        if (state->jpegBuffer) {
-                            memcpy(state->jpegBuffer, tempJpeg, jpegLen);
-                            state->jpegSize = jpegLen;
+                        
+                        if (state->rawBgraBuffer) {
+                            uint8_t* dst = state->rawBgraBuffer;
+                            int srcStride;
+                            
+                            if (useNativeFormat) {
+                                // Native format: YUV→RGB produces bottom-up RGB24
+                                // Flip vertical (bottom-up → top-down) + mirror horizontal (selfie)
+                                srcStride = rgbWidth * 3;
+                                for (int row = 0; row < rgbHeight; row++) {
+                                    const uint8_t* srcRow = rgbData + (rgbHeight - 1 - row) * srcStride;
+                                    uint8_t* dstRow = dst + row * rgbWidth * 4;
+                                    for (int col = 0; col < rgbWidth; col++) {
+                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        dstRow[col * 4 + 0] = srcRow[srcCol * 3 + 0]; // B
+                                        dstRow[col * 4 + 1] = srcRow[srcCol * 3 + 1]; // G
+                                        dstRow[col * 4 + 2] = srcRow[srcCol * 3 + 2]; // R
+                                        dstRow[col * 4 + 3] = 255;                    // A
+                                    }
+                                }
+                            } else if (bpp == 4) {
+                                // RGB32 (BGRA) bottom-up → top-down + mirror horizontal
+                                srcStride = rgbWidth * 4;
+                                for (int row = 0; row < rgbHeight; row++) {
+                                    const uint8_t* srcRow = pBits + (rgbHeight - 1 - row) * srcStride;
+                                    uint8_t* dstRow = dst + row * srcStride;
+                                    for (int col = 0; col < rgbWidth; col++) {
+                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        memcpy(dstRow + col * 4, srcRow + srcCol * 4, 4);
+                                    }
+                                }
+                            } else {
+                                // RGB24 (BGR) bottom-up → BGRA top-down + mirror horizontal
+                                srcStride = ((rgbWidth * 3 + 3) & ~3);
+                                for (int row = 0; row < rgbHeight; row++) {
+                                    const uint8_t* srcRow = pBits + (rgbHeight - 1 - row) * srcStride;
+                                    uint8_t* dstRow = dst + row * rgbWidth * 4;
+                                    for (int col = 0; col < rgbWidth; col++) {
+                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        dstRow[col * 4 + 0] = srcRow[srcCol * 3 + 0]; // B
+                                        dstRow[col * 4 + 1] = srcRow[srcCol * 3 + 1]; // G
+                                        dstRow[col * 4 + 2] = srcRow[srcCol * 3 + 2]; // R
+                                        dstRow[col * 4 + 3] = 255;                    // A
+                                    }
+                                }
+                            }
+                            
+                            state->rawBgraSize = bgraSize;
+                            state->bgraWidth = rgbWidth;
+                            state->bgraHeight = rgbHeight;
                             state->frameReady = 1;
+                            frameCount++;
+                            
+                            if (frameCount == 1) {
+                                LOG("capture_thread: FIRST FRAME! raw BGRA %dx%d = %d bytes (bpp=%d, native=%d)\n",
+                                    rgbWidth, rgbHeight, bgraSize, bpp, useNativeFormat);
+                            }
+                            if (frameCount % 30 == 0) {
+                                LOG("capture_thread: frame #%d, raw BGRA %d bytes\n", frameCount, bgraSize);
+                            }
                         }
+                        
                         ReleaseMutex(state->frameMutex);
-                    } else {
-                        if (frameCount == 0) {
-                            LOG("capture_thread: encode_rgb_to_jpeg returned 0 (curLen=%u)\n", curLen);
-                        }
                     }
 
                     pBuffer->lpVtbl->Unlock(pBuffer);
@@ -1563,8 +1846,8 @@ exit:
 FFI_PLUGIN_EXPORT
 int startCameraCapture(int deviceIndex, int width, int height, int fps, int jpegQuality) {
     if (g_capture.running) {
-        LOG("Camera already capturing, stop first\n", 0);
-        return -1;
+        LOG("Camera already capturing, returning OK (idempotent)\n", 0);
+        return 0;  // FIX: Return success — don't kill working capture
     }
 
     // Initialize state
@@ -1573,11 +1856,14 @@ int startCameraCapture(int deviceIndex, int width, int height, int fps, int jpeg
     g_capture.width = width;
     g_capture.height = height;
     g_capture.fps = fps;
-    g_capture.jpegQuality = (jpegQuality > 0 && jpegQuality <= 100) ? jpegQuality : 60;
+    g_capture.jpegQuality = (jpegQuality > 0 && jpegQuality <= 100) ? jpegQuality : 92; // kept for API compat
     g_capture.running = 1;
+    g_capture.startTimeMs = GetTickCount();  // FIX: Record start time
     g_capture.frameReady = 0;
-    g_capture.jpegBuffer = (uint8_t*)malloc(2 * 1024 * 1024);  // 2MB for high-res JPEG
-    g_capture.jpegSize = 0;
+    g_capture.rawBgraBuffer = NULL;  // Allocated on first frame (size depends on actual resolution)
+    g_capture.rawBgraSize = 0;
+    g_capture.bgraWidth = 0;
+    g_capture.bgraHeight = 0;
 
     g_capture.frameMutex = CreateMutex(NULL, FALSE, NULL);
     if (!g_capture.frameMutex) {
@@ -1618,14 +1904,43 @@ void stopCameraCapture(void) {
         g_capture.frameMutex = NULL;
     }
 
-    if (g_capture.jpegBuffer) {
-        free(g_capture.jpegBuffer);
-        g_capture.jpegBuffer = NULL;
+    if (g_capture.rawBgraBuffer) {
+        free(g_capture.rawBgraBuffer);
+        g_capture.rawBgraBuffer = NULL;
     }
 
-    g_capture.jpegSize = 0;
+    g_capture.rawBgraSize = 0;
     g_capture.frameReady = 0;
     LOG("Camera capture stopped\n", 0);
+}
+
+/// Force stop camera - bypasses 3-second protection (for end call / dispose)
+FFI_PLUGIN_EXPORT
+void forceStopCameraCapture(void) {
+    if (!g_capture.running) return;
+
+    LOG("FORCE stopping camera capture...\n", 0);
+    g_capture.running = 0;
+
+    if (g_capture.threadHandle) {
+        WaitForSingleObject(g_capture.threadHandle, 5000);
+        CloseHandle(g_capture.threadHandle);
+        g_capture.threadHandle = NULL;
+    }
+
+    if (g_capture.frameMutex) {
+        CloseHandle(g_capture.frameMutex);
+        g_capture.frameMutex = NULL;
+    }
+
+    if (g_capture.rawBgraBuffer) {
+        free(g_capture.rawBgraBuffer);
+        g_capture.rawBgraBuffer = NULL;
+    }
+
+    g_capture.rawBgraSize = 0;
+    g_capture.frameReady = 0;
+    LOG("Camera capture force-stopped\n", 0);
 }
 
 FFI_PLUGIN_EXPORT
@@ -1642,19 +1957,26 @@ int getLatestFrame(uint8_t* buffer, int bufferSize) {
     if (!g_capture.running || !g_capture.frameReady || !buffer || bufferSize <= 0) {
         return 0;
     }
+    // Guard against race with stopCapture freeing the mutex
+    if (!g_capture.frameMutex || !g_capture.rawBgraBuffer) {
+        return 0;
+    }
 
     int copied = 0;
-    WaitForSingleObject(g_capture.frameMutex, INFINITE);
+    DWORD waitResult = WaitForSingleObject(g_capture.frameMutex, 100); // 100ms timeout instead of INFINITE
+    if (waitResult != WAIT_OBJECT_0) return 0;
 
-    if (g_capture.frameReady && g_capture.jpegSize > 0 && g_capture.jpegSize <= bufferSize) {
-        memcpy(buffer, g_capture.jpegBuffer, g_capture.jpegSize);
-        copied = g_capture.jpegSize;
+    if (g_capture.frameReady && g_capture.rawBgraBuffer && g_capture.rawBgraSize > 0 && g_capture.rawBgraSize <= bufferSize) {
+        memcpy(buffer, g_capture.rawBgraBuffer, g_capture.rawBgraSize);
+        copied = g_capture.rawBgraSize;
         g_capture.frameReady = 0; // Mark as consumed
     }
 
     ReleaseMutex(g_capture.frameMutex);
     return copied;
 }
+
+
 
 FFI_PLUGIN_EXPORT
 int getFrameWidth(void) {
@@ -1708,22 +2030,94 @@ void forceH265KeyFrame(void) {
     g_capture.h265ForceKey = 1;
 }
 
+FFI_PLUGIN_EXPORT
+void setVideoQuality(int quality) {
+    // No-op: adaptive quality removed
+    (void)quality;
+}
+
+FFI_PLUGIN_EXPORT
+int getVideoQuality(void) {
+    return 70; // Fixed quality
+}
+
 // ============================================================================
 // H.265/H.264 DECODER — decode received remote video
 // ============================================================================
 
-/// Initialize video decoder (H.265 first, then H.264 fallback)
+/// Detect codec type from NAL unit data (like Android's detectMimeFromNalu).
+/// Analyzes the NAL unit type byte after the start code (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01).
+/// Returns: 1 = H.265/HEVC, 2 = H.264/AVC, 0 = unknown.
+///
+/// H.264 NAL header: 1 byte  [F(1)][NRI(2)][Type(5)]
+///   - SPS=7, PPS=8, IDR=5 → Type <= 23
+/// H.265 NAL header: 2 bytes [F(1)][Type(6)][LayerID(6)][TID(3)]
+///   - VPS=32, SPS=33, PPS=34, IDR_W_RADL=19, IDR_N_LP=20
+///   - Type is at bits[6:1] of first byte → (byte >> 1) & 0x3F
+static int detectCodecFromNal(const uint8_t* data, int size) {
+    if (!data || size < 5) return 0;
+
+    // Find first NAL start code
+    for (int i = 0; i < size - 4; i++) {
+        int startCodeLen = 0;
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
+            startCodeLen = 3;
+        } else if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
+            startCodeLen = 4;
+        }
+        if (startCodeLen == 0) continue;
+
+        int nalByte = data[i + startCodeLen];
+        if (nalByte & 0x80) continue; // forbidden_zero_bit set → invalid
+
+        // Try H.265: nalType = (byte >> 1) & 0x3F
+        int h265Type = (nalByte >> 1) & 0x3F;
+        // H.265 VPS=32, SPS=33, PPS=34 → type >= 32
+        if (h265Type >= 32 && h265Type <= 40) {
+            return 1; // H.265
+        }
+
+        // Try H.264: nalType = byte & 0x1F
+        int h264Type = nalByte & 0x1F;
+        // H.264 SPS=7, PPS=8, IDR=5, non-IDR=1
+        if (h264Type >= 1 && h264Type <= 12) {
+            return 2; // H.264
+        }
+
+        // H.265 IDR types: 19 (IDR_W_RADL), 20 (IDR_N_LP), TRAIL_R=1, etc
+        // If h265Type is in range 0-31 (slice types), check if h264Type makes no sense
+        if (h265Type >= 16 && h265Type <= 21) {
+            return 1; // H.265 IDR/CRA
+        }
+    }
+    return 0; // Unknown
+}
+
+/// Detect codec type from compressed NAL data.
+/// Returns: 1 = H.265/HEVC, 2 = H.264/AVC, 0 = unknown.
+FFI_PLUGIN_EXPORT
+int detectCodecType(const uint8_t* data, int size) {
+    return detectCodecFromNal(data, size);
+}
+
+/// Initialize video decoder.
+/// codecType: 1=H.265/HEVC, 2=H.264/AVC.
+/// If already initialized with a different codec, will cleanup and reinit.
 FFI_PLUGIN_EXPORT
 int initVideoDecoder(int width, int height, int codecType) {
     if (g_decoder.initialized) {
-        LOG("initVideoDecoder: already initialized\n", 0);
-        return 0;
+        if (g_decoder.codecType == codecType) {
+            LOG("initVideoDecoder: already initialized with same codec=%d\n", codecType);
+            return 0;
+        }
+        // Different codec → cleanup and reinit
+        LOG("initVideoDecoder: codec changed %d → %d, reinitializing...\n", g_decoder.codecType, codecType);
+        cleanupVideoDecoder();
     }
 
     HRESULT hr;
-    BOOL shouldUninit = FALSE;
     hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    shouldUninit = SUCCEEDED(hr);
+    BOOL shouldUninit = SUCCEEDED(hr);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return -1;
 
     hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -1740,13 +2134,13 @@ int initVideoDecoder(int width, int height, int codecType) {
     }
 
     // Find decoder MFT
-    MFT_REGISTER_TYPE_INFO inputType = { MFMediaType_Video, *codecSubtype };
+    MFT_REGISTER_TYPE_INFO inputType = { MY_MFMediaType_Video, *codecSubtype };
     IMFActivate** ppActivate = NULL;
     UINT32 numActivate = 0;
 
     hr = MFTEnumEx(
         MFT_CATEGORY_VIDEO_DECODER,
-        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
         &inputType, NULL, &ppActivate, &numActivate);
 
     if (FAILED(hr) || numActivate == 0) {
@@ -1756,7 +2150,7 @@ int initVideoDecoder(int width, int height, int codecType) {
     }
 
     IMFTransform* pDecoder = NULL;
-    hr = ppActivate[0]->lpVtbl->ActivateObject(ppActivate[0], &IID_IMFTransform, (void**)&pDecoder);
+    hr = ppActivate[0]->lpVtbl->ActivateObject(ppActivate[0], &MY_IID_IMFTransform, (void**)&pDecoder);
     for (UINT32 i = 0; i < numActivate; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
     CoTaskMemFree(ppActivate);
 
@@ -1815,6 +2209,24 @@ int initVideoDecoder(int width, int height, int codecType) {
         LOG("initVideoDecoder: using RGB32 output\n", 0);
     }
 
+    // FIX: Set LOW LATENCY mode on decoder (critical for real-time video call!)
+    // Without this, decoder buffers multiple frames for B-frame reordering → ~2s delay
+    {
+        IMFAttributes* pDecoderAttrs = NULL;
+        hr = pDecoder->lpVtbl->GetAttributes(pDecoder, &pDecoderAttrs);
+        if (SUCCEEDED(hr) && pDecoderAttrs) {
+            // MF_LOW_LATENCY = {9C27891A-ED7A-40E1-88E8-B22727A024EE}
+            hr = pDecoderAttrs->lpVtbl->SetUINT32(pDecoderAttrs,
+                &MY_CODECAPI_AVLowLatencyMode, 1);
+            if (SUCCEEDED(hr)) {
+                LOG("initVideoDecoder: Low-latency mode ENABLED\n", 0);
+            } else {
+                LOG("initVideoDecoder: Low-latency mode not supported (0x%08X)\n", hr);
+            }
+            pDecoderAttrs->lpVtbl->Release(pDecoderAttrs);
+        }
+    }
+
     // Start streaming
     hr = pDecoder->lpVtbl->ProcessMessage(pDecoder, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     if (FAILED(hr)) LOG("initVideoDecoder: BEGIN_STREAMING warning: 0x%08X\n", hr);
@@ -1827,11 +2239,12 @@ int initVideoDecoder(int width, int height, int codecType) {
     g_decoder.height = height;
     g_decoder.codecType = codecType;
     g_decoder.mutex = CreateMutexA(NULL, FALSE, NULL);
-    g_decoder.outputBuffer = (uint8_t*)malloc(512 * 1024); // 512KB for decoded JPEG
+    g_decoder.outputBuffer = (uint8_t*)malloc(width * height * 4); // BGRA raw pixels
     g_decoder.outputSize = 0;
     g_decoder.frameReady = 0;
     g_decoder.frameIndex = 0;
     g_decoder.initialized = 1;
+    g_decoder.shouldUninitCOM = shouldUninit ? 1 : 0;
 
     LOG("initVideoDecoder: OK, %dx%d, codec=%d\n", width, height, codecType);
     return 0;
@@ -1876,178 +2289,159 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
         return -1;
     }
 
-    // Try to get output
-    MFT_OUTPUT_DATA_BUFFER outputData = {0};
-    IMFMediaBuffer* pOutputBuffer = NULL;
-    IMFSample* pOutputSample = NULL;
+    // Try to get ALL available output (decoder may buffer multiple frames)
+    // FIX: Must loop ProcessOutput — hardware decoders buffer frames internally.
+    // In release builds, input is fed faster → decoder buffers fill up → stops accepting input.
+    int outputCount = 0;
+    for (;;) {
+        MFT_OUTPUT_DATA_BUFFER outputData = {0};
+        IMFMediaBuffer* pOutputBuffer = NULL;
+        IMFSample* pOutputSample = NULL;
 
-    // Check if decoder allocates its own samples
-    MFT_OUTPUT_STREAM_INFO streamInfo = {0};
-    pDecoder->lpVtbl->GetOutputStreamInfo(pDecoder, 0, &streamInfo);
+        // Check if decoder allocates its own samples
+        MFT_OUTPUT_STREAM_INFO streamInfo = {0};
+        pDecoder->lpVtbl->GetOutputStreamInfo(pDecoder, 0, &streamInfo);
 
-    if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
-        // We need to provide output sample
-        hr = MFCreateMemoryBuffer(g_decoder.width * g_decoder.height * 4, &pOutputBuffer);
-        if (FAILED(hr)) return -1;
+        if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+            // We need to provide output sample
+            hr = MFCreateMemoryBuffer(g_decoder.width * g_decoder.height * 4, &pOutputBuffer);
+            if (FAILED(hr)) break;
 
-        MFCreateSample(&pOutputSample);
-        pOutputSample->lpVtbl->AddBuffer(pOutputSample, pOutputBuffer);
-        outputData.pSample = pOutputSample;
-    }
-
-    DWORD status = 0;
-    hr = pDecoder->lpVtbl->ProcessOutput(pDecoder, 0, 1, &outputData, &status);
-
-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        // Decoder needs more data (normal for B-frames or initial buffering)
-        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
-        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
-        g_decoder.frameIndex++;
-        return 0; // not an error, just need more data
-    }
-
-    if (FAILED(hr)) {
-        if (g_decoder.frameIndex <= 3)
-            LOG("decodeVideoFrame: ProcessOutput failed: 0x%08X\n", hr);
-        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
-        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
-        return -1;
-    }
-
-    // Got decoded frame! Extract raw data and convert to JPEG
-    IMFSample* pResultSample = outputData.pSample;
-    if (!pResultSample) {
-        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
-        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
-        return -1;
-    }
-
-    IMFMediaBuffer* pResultBuffer = NULL;
-    pResultSample->lpVtbl->ConvertToContiguousBuffer(pResultSample, &pResultBuffer);
-
-    if (pResultBuffer) {
-        BYTE* rawData = NULL;
-        DWORD rawLen = 0;
-        pResultBuffer->lpVtbl->Lock(pResultBuffer, &rawData, NULL, &rawLen);
-
-        if (rawData && rawLen > 0) {
-            // Convert decoded frame to JPEG for Flutter display
-            int w = g_decoder.width;
-            int h = g_decoder.height;
-            int rgbSize = w * h * 3;
-            uint8_t* rgbBuf = (uint8_t*)malloc(rgbSize);
-            if (rgbBuf) {
-                if (g_decoder.outputIsNV12) {
-                    // NV12 → BGR24 conversion (BGR for WIC GUID_WICPixelFormat24bppBGR)
-                    const uint8_t* yPlane = rawData;
-                    const uint8_t* uvPlane = rawData + w * h;
-                    for (int row = 0; row < h; row++) {
-                        for (int col = 0; col < w; col++) {
-                            int y = yPlane[row * w + col];
-                            int u = uvPlane[(row/2) * w + (col & ~1)] - 128;
-                            int v = uvPlane[(row/2) * w + (col | 1)] - 128;
-                            int r = y + ((v * 359) >> 8);
-                            int g = y - ((u * 88 + v * 183) >> 8);
-                            int b = y + ((u * 454) >> 8);
-                            if (r < 0) r = 0; if (r > 255) r = 255;
-                            if (g < 0) g = 0; if (g > 255) g = 255;
-                            if (b < 0) b = 0; if (b > 255) b = 255;
-                            int idx = (row * w + col) * 3;
-                            rgbBuf[idx]   = (uint8_t)b;  // B
-                            rgbBuf[idx+1] = (uint8_t)g;  // G
-                            rgbBuf[idx+2] = (uint8_t)r;  // R
-                        }
-                    }
-                } else {
-                    // RGB32 (BGRA) → BGR24 conversion
-                    for (int row = 0; row < h; row++) {
-                        for (int col = 0; col < w; col++) {
-                            int srcIdx = (row * w + col) * 4;  // BGRA
-                            int dstIdx = (row * w + col) * 3;  // BGR
-                            rgbBuf[dstIdx]   = rawData[srcIdx];     // B
-                            rgbBuf[dstIdx+1] = rawData[srcIdx+1];   // G
-                            rgbBuf[dstIdx+2] = rawData[srcIdx+2];   // R
-                        }
-                    }
-                }
-
-                // Encode BGR24 to JPEG using WIC
-                IWICImagingFactory* pFactory = NULL;
-                HRESULT jhr = CoCreateInstance(&CLSID_WICImagingFactory, NULL,
-                    CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void**)&pFactory);
-                if (SUCCEEDED(jhr)) {
-                    IStream* pStream = SHCreateMemStream(NULL, 0);
-                    if (pStream) {
-                        IWICBitmapEncoder* pEnc = NULL;
-                        jhr = pFactory->lpVtbl->CreateEncoder(pFactory, &GUID_ContainerFormatJpeg, NULL, &pEnc);
-                        if (SUCCEEDED(jhr)) {
-                            pEnc->lpVtbl->Initialize(pEnc, pStream, WICBitmapEncoderNoCache);
-                            IWICBitmapFrameEncode* pFrame = NULL;
-                            IPropertyBag2* pProps = NULL;
-                            pEnc->lpVtbl->CreateNewFrame(pEnc, &pFrame, &pProps);
-                            if (pFrame) {
-                                PROPBAG2 opt = {0}; opt.pstrName = L"ImageQuality";
-                                VARIANT varQ; VariantInit(&varQ); varQ.vt = VT_R4; varQ.fltVal = 0.7f;
-                                pProps->lpVtbl->Write(pProps, 1, &opt, &varQ);
-                                pFrame->lpVtbl->Initialize(pFrame, pProps);
-                                pFrame->lpVtbl->SetSize(pFrame, w, h);
-                                WICPixelFormatGUID fmt = MY_GUID_WICPixelFormat24bppBGR;
-                                pFrame->lpVtbl->SetPixelFormat(pFrame, &fmt);
-                                pFrame->lpVtbl->WritePixels(pFrame, h, w * 3, rgbSize, rgbBuf);
-                                pFrame->lpVtbl->Commit(pFrame);
-                                pEnc->lpVtbl->Commit(pEnc);
-
-                                LARGE_INTEGER zero = {0};
-                                pStream->lpVtbl->Seek(pStream, zero, STREAM_SEEK_SET, NULL);
-                                STATSTG stat;
-                                pStream->lpVtbl->Stat(pStream, &stat, STATFLAG_NONAME);
-                                ULONG jpegLen = (ULONG)stat.cbSize.QuadPart;
-
-                                WaitForSingleObject(g_decoder.mutex, INFINITE);
-                                if (jpegLen <= 512 * 1024) {
-                                    pStream->lpVtbl->Read(pStream, g_decoder.outputBuffer, jpegLen, NULL);
-                                    g_decoder.outputSize = jpegLen;
-                                    g_decoder.frameReady = 1;
-                                }
-                                ReleaseMutex(g_decoder.mutex);
-
-                                pFrame->lpVtbl->Release(pFrame);
-                            }
-                            if (pProps) pProps->lpVtbl->Release(pProps);
-                            pEnc->lpVtbl->Release(pEnc);
-                        }
-                        pStream->lpVtbl->Release(pStream);
-                    }
-                    pFactory->lpVtbl->Release(pFactory);
-                }
-                free(rgbBuf);
-            }
+            MFCreateSample(&pOutputSample);
+            pOutputSample->lpVtbl->AddBuffer(pOutputSample, pOutputBuffer);
+            outputData.pSample = pOutputSample;
         }
-        pResultBuffer->lpVtbl->Unlock(pResultBuffer);
-        pResultBuffer->lpVtbl->Release(pResultBuffer);
-    }
 
-    if (pResultSample != pOutputSample && pResultSample)
-        pResultSample->lpVtbl->Release(pResultSample);
-    if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
-    if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+        DWORD status = 0;
+        hr = pDecoder->lpVtbl->ProcessOutput(pDecoder, 0, 1, &outputData, &status);
+
+        if (hr == ((HRESULT)0xC00D6D72L)) { // MF_E_TRANSFORM_NEED_MORE_INPUT
+            if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+            if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+            break; // No more output available — normal exit
+        }
+
+        if (hr == ((HRESULT)0xC00D6D60L)) { // MF_E_TRANSFORM_STREAM_CHANGE
+            // Output format changed — re-negotiate
+            if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+            if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+            LOG("decodeVideoFrame: stream change detected, re-negotiating output\n", 0);
+
+            // Re-set output type
+            IMFMediaType* pNewOutputType = NULL;
+            hr = pDecoder->lpVtbl->GetOutputAvailableType(pDecoder, 0, 0, &pNewOutputType);
+            if (SUCCEEDED(hr)) {
+                pDecoder->lpVtbl->SetOutputType(pDecoder, 0, pNewOutputType, 0);
+                // Check if output is NV12 or RGB32
+                GUID subtype = {0};
+                pNewOutputType->lpVtbl->GetGUID(pNewOutputType, &MF_MT_SUBTYPE, &subtype);
+                g_decoder.outputIsNV12 = IsEqualGUID(&subtype, &MY_MFVideoFormat_NV12) ? 1 : 0;
+                pNewOutputType->lpVtbl->Release(pNewOutputType);
+            }
+            continue; // Try ProcessOutput again after format change
+        }
+
+        if (FAILED(hr)) {
+            if (g_decoder.frameIndex <= 3)
+                LOG("decodeVideoFrame: ProcessOutput failed: 0x%08X\n", hr);
+            if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+            if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+            break;
+        }
+
+        // Got decoded frame! Extract raw data and convert to JPEG
+        IMFSample* pResultSample = outputData.pSample;
+        if (!pResultSample) {
+            if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+            if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+            break;
+        }
+
+        IMFMediaBuffer* pResultBuffer = NULL;
+        pResultSample->lpVtbl->ConvertToContiguousBuffer(pResultSample, &pResultBuffer);
+
+        if (pResultBuffer) {
+            BYTE* rawData = NULL;
+            DWORD rawLen = 0;
+            pResultBuffer->lpVtbl->Lock(pResultBuffer, &rawData, NULL, &rawLen);
+
+            if (rawData && rawLen > 0) {
+                // Convert decoded frame directly to BGRA (no JPEG — lossless!)
+                int w = g_decoder.width;
+                int h = g_decoder.height;
+                int bgraSize = w * h * 4;
+
+                if (g_decoder.outputBuffer) {
+                    uint8_t* bgra = g_decoder.outputBuffer;
+
+                    if (g_decoder.outputIsNV12) {
+                        // NV12 → BGRA (top-down, ready for Flutter display)
+                        const uint8_t* yPlane = rawData;
+                        const uint8_t* uvPlane = rawData + w * h;
+                        for (int row = 0; row < h; row++) {
+                            for (int col = 0; col < w; col++) {
+                                int y = yPlane[row * w + col];
+                                int u = uvPlane[(row/2) * w + (col & ~1)] - 128;
+                                int v = uvPlane[(row/2) * w + (col | 1)] - 128;
+                                int r = y + ((v * 359) >> 8);
+                                int g = y - ((u * 88 + v * 183) >> 8);
+                                int b = y + ((u * 454) >> 8);
+                                if (r < 0) r = 0; if (r > 255) r = 255;
+                                if (g < 0) g = 0; if (g > 255) g = 255;
+                                if (b < 0) b = 0; if (b > 255) b = 255;
+                                int idx = (row * w + col) * 4;
+                                bgra[idx]   = (uint8_t)b;
+                                bgra[idx+1] = (uint8_t)g;
+                                bgra[idx+2] = (uint8_t)r;
+                                bgra[idx+3] = 255; // Alpha
+                            }
+                        }
+                    } else {
+                        // RGB32 (BGRA) — direct copy
+                        int copyLen = (int)rawLen < bgraSize ? (int)rawLen : bgraSize;
+                        memcpy(bgra, rawData, copyLen);
+                    }
+
+                    WaitForSingleObject(g_decoder.mutex, INFINITE);
+                    g_decoder.outputSize = bgraSize;
+                    g_decoder.frameReady = 1;
+                    ReleaseMutex(g_decoder.mutex);
+                }
+            }
+            pResultBuffer->lpVtbl->Unlock(pResultBuffer);
+            pResultBuffer->lpVtbl->Release(pResultBuffer);
+        }
+
+        if (pResultSample != pOutputSample && pResultSample)
+            pResultSample->lpVtbl->Release(pResultSample);
+        if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
+        if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
+        outputCount++;
+
+        // Safety: max 5 frames per call to avoid blocking too long
+        if (outputCount >= 5) break;
+    } // end ProcessOutput drain loop
 
     g_decoder.frameIndex++;
     if (g_decoder.frameIndex <= 3 || g_decoder.frameIndex % 30 == 0) {
-        LOG("decodeVideoFrame: frame #%lld decoded, jpeg=%d bytes\n",
-            g_decoder.frameIndex, g_decoder.outputSize);
+        LOG("decodeVideoFrame: frame #%lld, outputs=%d, bgra=%d bytes\n",
+            g_decoder.frameIndex, outputCount, g_decoder.outputSize);
     }
-    return 1; // success
+    return outputCount > 0 ? 1 : 0;
 }
 
-/// Get latest decoded frame (JPEG)
+/// Get latest decoded frame (raw BGRA pixels)
 FFI_PLUGIN_EXPORT
 int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize) {
-    if (!g_decoder.initialized || !g_decoder.frameReady) return 0;
+    if (!g_decoder.initialized || !g_decoder.frameReady || !outBuffer || maxSize <= 0) return 0;
+    // Guard against race with cleanupVideoDecoder
+    if (!g_decoder.mutex || !g_decoder.outputBuffer) return 0;
 
-    WaitForSingleObject(g_decoder.mutex, INFINITE);
+    DWORD waitResult = WaitForSingleObject(g_decoder.mutex, 100);
+    if (waitResult != WAIT_OBJECT_0) return 0;
+
     int copied = 0;
-    if (g_decoder.frameReady && g_decoder.outputSize > 0 && g_decoder.outputSize <= maxSize) {
+    if (g_decoder.frameReady && g_decoder.outputBuffer && g_decoder.outputSize > 0 && g_decoder.outputSize <= maxSize) {
         memcpy(outBuffer, g_decoder.outputBuffer, g_decoder.outputSize);
         copied = g_decoder.outputSize;
         g_decoder.frameReady = 0;
@@ -2060,6 +2454,7 @@ int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize) {
 FFI_PLUGIN_EXPORT
 void cleanupVideoDecoder(void) {
     if (!g_decoder.initialized) return;
+    LOG("cleanupVideoDecoder: starting cleanup...\n", 0);
 
     if (g_decoder.pDecoder) {
         g_decoder.pDecoder->lpVtbl->ProcessMessage(g_decoder.pDecoder, MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
@@ -2069,9 +2464,24 @@ void cleanupVideoDecoder(void) {
     }
     if (g_decoder.mutex) { CloseHandle(g_decoder.mutex); g_decoder.mutex = NULL; }
     if (g_decoder.outputBuffer) { free(g_decoder.outputBuffer); g_decoder.outputBuffer = NULL; }
+
+
+
+    int shouldUninit = g_decoder.shouldUninitCOM;
     g_decoder.initialized = 0;
     g_decoder.frameReady = 0;
     g_decoder.outputSize = 0;
     g_decoder.frameIndex = 0;
-    LOG("cleanupVideoDecoder: done\n", 0);
+    g_decoder.shouldUninitCOM = 0;
+
+    // Release cached WIC factory (since we're shutting down MF/COM)
+    if (g_pWICFactory) {
+        g_pWICFactory->lpVtbl->Release(g_pWICFactory);
+        g_pWICFactory = NULL;
+        LOG("cleanupVideoDecoder: Released cached WIC factory\n", 0);
+    }
+
+    MFShutdown();
+    if (shouldUninit) CoUninitialize();
+    LOG("cleanupVideoDecoder: done (MFShutdown + CoUninitialize)\n", 0);
 }

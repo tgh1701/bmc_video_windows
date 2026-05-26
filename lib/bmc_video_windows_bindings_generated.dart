@@ -117,4 +117,164 @@ class BmcVideoWindowsBindings {
       _dylib.lookupFunction<ffi.Int32 Function(), int Function()>(
           'getFrameHeight');
   int _getFrameHeight() => _getFrameHeightPtr();
+
+  /// Get path to the native debug log file.
+  ffi.Pointer<ffi.Char> getLogFilePath() {
+    return _getLogFilePath();
+  }
+
+  late final _getLogFilePathPtr = _dylib.lookupFunction<
+      ffi.Pointer<ffi.Char> Function(),
+      ffi.Pointer<ffi.Char> Function()>('getLogFilePath');
+  ffi.Pointer<ffi.Char> _getLogFilePath() => _getLogFilePathPtr();
+
+  // ============================================================================
+  // Resolution Enumeration
+  // ============================================================================
+
+  /// Get number of unique supported resolutions for a camera device.
+  int getCameraResolutionCount(int deviceIndex) {
+    return _getCameraResolutionCount(deviceIndex);
+  }
+
+  late final _getCameraResolutionCountPtr =
+      _dylib.lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
+          'getCameraResolutionCount');
+  int _getCameraResolutionCount(int deviceIndex) =>
+      _getCameraResolutionCountPtr(deviceIndex);
+
+  /// Get resolution info as string "WIDTHxHEIGHT@FPS" at given index.
+  ffi.Pointer<ffi.Char> getCameraResolution(int resIndex) {
+    return _getCameraResolution(resIndex);
+  }
+
+  late final _getCameraResolutionPtr = _dylib.lookupFunction<
+      ffi.Pointer<ffi.Char> Function(ffi.Int32),
+      ffi.Pointer<ffi.Char> Function(int)>('getCameraResolution');
+  ffi.Pointer<ffi.Char> _getCameraResolution(int resIndex) =>
+      _getCameraResolutionPtr(resIndex);
+
+  // ============================================================================
+  // H.265/H.264 Video Encoder
+  // ============================================================================
+
+  /// Get the latest H.265/H.264 encoded frame.
+  int getLatestH265Frame(ffi.Pointer<ffi.Uint8> buffer, int bufferSize) {
+    return _getLatestH265Frame(buffer, bufferSize);
+  }
+
+  late final _getLatestH265FramePtr = _dylib.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Int32),
+      int Function(ffi.Pointer<ffi.Uint8>, int)>('getLatestH265Frame');
+  int _getLatestH265Frame(ffi.Pointer<ffi.Uint8> buffer, int bufferSize) =>
+      _getLatestH265FramePtr(buffer, bufferSize);
+
+  /// Check if the latest H.265 frame is a keyframe (I-frame).
+  int isH265KeyFrame() {
+    return _isH265KeyFrame();
+  }
+
+  late final _isH265KeyFramePtr =
+      _dylib.lookupFunction<ffi.Int32 Function(), int Function()>(
+          'isH265KeyFrame');
+  int _isH265KeyFrame() => _isH265KeyFramePtr();
+
+  /// Get active video codec type: 0=none, 1=H.265/HEVC, 2=H.264/AVC.
+  int getH265CodecType() {
+    return _getH265CodecType();
+  }
+
+  late final _getH265CodecTypePtr =
+      _dylib.lookupFunction<ffi.Int32 Function(), int Function()>(
+          'getH265CodecType');
+  int _getH265CodecType() => _getH265CodecTypePtr();
+
+  /// Force the next frame to be encoded as a keyframe.
+  void forceH265KeyFrame() {
+    _forceH265KeyFrame();
+  }
+
+  late final _forceH265KeyFramePtr =
+      _dylib.lookupFunction<ffi.Void Function(), void Function()>(
+          'forceH265KeyFrame');
+  void _forceH265KeyFrame() => _forceH265KeyFramePtr();
+
+  /// Set video encoder quality (10-100, higher = better quality, larger frames)
+  void setVideoQuality(int quality) {
+    _setVideoQuality(quality);
+  }
+
+  late final _setVideoQualityPtr =
+      _dylib.lookupFunction<ffi.Void Function(ffi.Int32), void Function(int)>(
+          'setVideoQuality');
+  void _setVideoQuality(int quality) => _setVideoQualityPtr(quality);
+
+  /// Get current video encoder quality (10-100)
+  int getVideoQuality() {
+    return _getVideoQuality();
+  }
+
+  late final _getVideoQualityPtr =
+      _dylib.lookupFunction<ffi.Int32 Function(), int Function()>(
+          'getVideoQuality');
+  int _getVideoQuality() => _getVideoQualityPtr();
+
+  // ============================================================================
+  // H.265/H.264 Video Decoder
+  // ============================================================================
+
+  /// Detect codec type from compressed NAL data (auto-detect like Android).
+  /// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=unknown.
+  int detectCodecType(ffi.Pointer<ffi.Uint8> data, int size) {
+    return _detectCodecType(data, size);
+  }
+
+  late final _detectCodecTypePtr = _dylib.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Int32),
+      int Function(ffi.Pointer<ffi.Uint8>, int)>('detectCodecType');
+  int _detectCodecType(ffi.Pointer<ffi.Uint8> data, int size) =>
+      _detectCodecTypePtr(data, size);
+
+  /// Initialize video decoder.
+  int initVideoDecoder(int width, int height, int codecType) {
+    return _initVideoDecoder(width, height, codecType);
+  }
+
+  late final _initVideoDecoderPtr = _dylib.lookupFunction<
+      ffi.Int32 Function(ffi.Int32, ffi.Int32, ffi.Int32),
+      int Function(int, int, int)>('initVideoDecoder');
+  int _initVideoDecoder(int width, int height, int codecType) =>
+      _initVideoDecoderPtr(width, height, codecType);
+
+  /// Decode a compressed video frame.
+  int decodeVideoFrame(ffi.Pointer<ffi.Uint8> compressedData, int compressedSize) {
+    return _decodeVideoFrame(compressedData, compressedSize);
+  }
+
+  late final _decodeVideoFramePtr = _dylib.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Int32),
+      int Function(ffi.Pointer<ffi.Uint8>, int)>('decodeVideoFrame');
+  int _decodeVideoFrame(ffi.Pointer<ffi.Uint8> compressedData, int compressedSize) =>
+      _decodeVideoFramePtr(compressedData, compressedSize);
+
+  /// Get latest decoded frame as JPEG bytes.
+  int getLatestDecodedFrame(ffi.Pointer<ffi.Uint8> outBuffer, int maxSize) {
+    return _getLatestDecodedFrame(outBuffer, maxSize);
+  }
+
+  late final _getLatestDecodedFramePtr = _dylib.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Int32),
+      int Function(ffi.Pointer<ffi.Uint8>, int)>('getLatestDecodedFrame');
+  int _getLatestDecodedFrame(ffi.Pointer<ffi.Uint8> outBuffer, int maxSize) =>
+      _getLatestDecodedFramePtr(outBuffer, maxSize);
+
+  /// Cleanup decoder and release resources.
+  void cleanupVideoDecoder() {
+    _cleanupVideoDecoder();
+  }
+
+  late final _cleanupVideoDecoderPtr =
+      _dylib.lookupFunction<ffi.Void Function(), void Function()>(
+          'cleanupVideoDecoder');
+  void _cleanupVideoDecoder() => _cleanupVideoDecoderPtr();
 }

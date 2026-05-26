@@ -96,24 +96,15 @@ class CameraResolution {
   String toString() => label;
 }
 
-// Native function typedefs for resolution enumeration
-typedef _GetCameraResolutionCountC = Int32 Function(Int32 deviceIndex);
-typedef _GetCameraResolutionCountDart = int Function(int deviceIndex);
-typedef _GetCameraResolutionC = Pointer<Utf8> Function(Int32 resIndex);
-typedef _GetCameraResolutionDart = Pointer<Utf8> Function(int resIndex);
-
 /// List all supported resolutions for a camera device.
 /// Returns sorted list (best/highest resolution first).
 List<CameraResolution> listCameraResolutions(int deviceIndex) {
-  final getCount = _dylib.lookupFunction<_GetCameraResolutionCountC, _GetCameraResolutionCountDart>('getCameraResolutionCount');
-  final getRes = _dylib.lookupFunction<_GetCameraResolutionC, _GetCameraResolutionDart>('getCameraResolution');
-
-  final count = getCount(deviceIndex);
+  final count = _bindings.getCameraResolutionCount(deviceIndex);
   final resolutions = <CameraResolution>[];
 
   for (int i = 0; i < count; i++) {
-    final ptr = getRes(i);
-    final str = ptr.toDartString(); // "1920x1080@30"
+    final ptr = _bindings.getCameraResolution(i);
+    final str = ptr.cast<Utf8>().toDartString(); // "1920x1080@30"
     if (str.isEmpty) continue;
 
     // Parse "WIDTHxHEIGHT@FPS"
@@ -154,7 +145,21 @@ int startCapture({
 }
 
 /// Stop camera capture and release resources.
+/// NOTE: This is BLOCKED for 3 seconds after start (race condition protection).
+/// Use forceStopCapture() when actually ending a call.
 void stopCapture() => _bindings.stopCameraCapture();
+
+/// Force stop camera capture — bypasses 3-second protection.
+/// Use this when ACTUALLY ending a video call (dispose/bye).
+void forceStopCapture() {
+  try {
+    final forceStop = _dylib.lookupFunction<Void Function(), void Function()>('forceStopCameraCapture');
+    forceStop();
+  } catch (_) {
+    // Fallback to regular stop if function not found
+    _bindings.stopCameraCapture();
+  }
+}
 
 /// Check if camera is currently capturing.
 bool isCapturing() => _bindings.isCameraCapturing() != 0;
@@ -163,22 +168,24 @@ bool isCapturing() => _bindings.isCameraCapturing() != 0;
 // Frame Retrieval
 // ============================================================================
 
-/// Maximum JPEG frame buffer size (2 MB - sufficient for up to 4K JPEG).
-const int _maxJpegBufferSize = 2 * 1024 * 1024;
+/// Maximum raw BGRA frame buffer size (4 MB - supports up to 1024x1024 BGRA).
+const int _maxRawFrameBufferSize = 4 * 1024 * 1024;
 
 /// Reusable native buffer to avoid repeated allocation.
 Pointer<Uint8>? _frameBuffer;
 
-/// Get the latest captured frame as JPEG-encoded bytes.
-/// Returns null if no new frame is available.
-Uint8List? getLatestJpegFrame() {
-  _frameBuffer ??= calloc<Uint8>(_maxJpegBufferSize);
+/// Get the latest captured frame as raw BGRA pixel bytes.
+/// Returns a VIEW into native memory (zero-copy).
+/// IMPORTANT: Data is only valid until the next call to this function!
+/// Safe because decodeImageFromPixels copies pixel data synchronously.
+Uint8List? getLatestRawFrame() {
+  _frameBuffer ??= calloc<Uint8>(_maxRawFrameBufferSize);
 
-  final int bytesWritten = _bindings.getLatestFrame(_frameBuffer!, _maxJpegBufferSize);
+  final int bytesWritten = _bindings.getLatestFrame(_frameBuffer!, _maxRawFrameBufferSize);
   if (bytesWritten <= 0) return null;
 
-  // Copy from native buffer to Dart Uint8List
-  return Uint8List.fromList(_frameBuffer!.asTypedList(bytesWritten));
+  // Zero-copy: return view into native buffer
+  return _frameBuffer!.asTypedList(bytesWritten);
 }
 
 /// Get the actual width of captured frames.
@@ -187,12 +194,27 @@ int getFrameWidth() => _bindings.getFrameWidth();
 /// Get the actual height of captured frames.
 int getFrameHeight() => _bindings.getFrameHeight();
 
-/// Release the reusable native buffer.
-/// Call this when you're done with camera operations.
+/// Release ALL reusable native buffers.
+/// Call this when you're done with camera operations (end of video call).
 void disposeFrameBuffer() {
   if (_frameBuffer != null) {
     calloc.free(_frameBuffer!);
     _frameBuffer = null;
+  }
+  // FIX: Also free H.265 encoder buffer (was previously leaked)
+  if (_h265Buffer != null) {
+    calloc.free(_h265Buffer!);
+    _h265Buffer = null;
+  }
+  // FIX: Also free decoder buffers (were previously only freed in cleanupVideoDecoder)
+  if (_decoderBuffer != null) {
+    calloc.free(_decoderBuffer!);
+    _decoderBuffer = null;
+  }
+  if (_decoderInputBuffer != null) {
+    calloc.free(_decoderInputBuffer!);
+    _decoderInputBuffer = null;
+    _decoderInputBufferSize = 0;
   }
 }
 
@@ -200,73 +222,68 @@ void disposeFrameBuffer() {
 // H.265/H.264 Video Encoder
 // ============================================================================
 
-// Native function typedefs for H.265 encoder
-typedef _GetLatestH265FrameC = Int32 Function(Pointer<Uint8> buffer, Int32 bufferSize);
-typedef _GetLatestH265FrameDart = int Function(Pointer<Uint8> buffer, int bufferSize);
-typedef _IsH265KeyFrameC = Int32 Function();
-typedef _IsH265KeyFrameDart = int Function();
-typedef _GetH265CodecTypeC = Int32 Function();
-typedef _GetH265CodecTypeDart = int Function();
-typedef _ForceH265KeyFrameC = Void Function();
-typedef _ForceH265KeyFrameDart = void Function();
-
 /// H.265 frame buffer (512KB for compressed output)
 const int _maxH265BufferSize = 512 * 1024;
 Pointer<Uint8>? _h265Buffer;
 
 /// Get the latest H.265/H.264 encoded frame.
-/// Returns null if no new frame available.
+/// Returns a VIEW into native memory (zero-copy).
+/// IMPORTANT: Data is only valid until the next call to this function!
 Uint8List? getLatestH265Frame() {
   _h265Buffer ??= calloc<Uint8>(_maxH265BufferSize);
-  final getFrame = _dylib.lookupFunction<_GetLatestH265FrameC, _GetLatestH265FrameDart>('getLatestH265Frame');
-  final size = getFrame(_h265Buffer!, _maxH265BufferSize);
+  final size = _bindings.getLatestH265Frame(_h265Buffer!, _maxH265BufferSize);
   if (size <= 0) return null;
-  return Uint8List.fromList(_h265Buffer!.asTypedList(size));
+  // Zero-copy: return view into native buffer
+  // Safe because _sendVideoUdp copies data into UDP packet immediately
+  return _h265Buffer!.asTypedList(size);
 }
 
 /// Check if the latest H.265 frame is a keyframe (I-frame).
-bool isH265KeyFrame() {
-  final fn = _dylib.lookupFunction<_IsH265KeyFrameC, _IsH265KeyFrameDart>('isH265KeyFrame');
-  return fn() != 0;
-}
+bool isH265KeyFrame() => _bindings.isH265KeyFrame() != 0;
 
 /// Get active video codec type: 0=none, 1=H.265/HEVC, 2=H.264/AVC.
-int getH265CodecType() {
-  final fn = _dylib.lookupFunction<_GetH265CodecTypeC, _GetH265CodecTypeDart>('getH265CodecType');
-  return fn();
-}
+int getH265CodecType() => _bindings.getH265CodecType();
 
 /// Force the next frame to be encoded as a keyframe.
-void forceH265KeyFrame() {
-  final fn = _dylib.lookupFunction<_ForceH265KeyFrameC, _ForceH265KeyFrameDart>('forceH265KeyFrame');
-  fn();
-}
+void forceH265KeyFrame() => _bindings.forceH265KeyFrame();
+
+/// Set encoder quality (10-100). Higher = better quality, larger frames.
+void setVideoQuality(int quality) => _bindings.setVideoQuality(quality);
+
+/// Get current encoder quality (10-100).
+int getVideoQuality() => _bindings.getVideoQuality();
 
 // ============================================================================
 // H.265/H.264 Video Decoder (for remote video)
 // ============================================================================
 
-// Native function typedefs for decoder
-typedef _InitVideoDecoderC = Int32 Function(Int32 width, Int32 height, Int32 codecType);
-typedef _InitVideoDecoderDart = int Function(int width, int height, int codecType);
-typedef _DecodeVideoFrameC = Int32 Function(Pointer<Uint8> data, Int32 size);
-typedef _DecodeVideoFrameDart = int Function(Pointer<Uint8> data, int size);
-typedef _GetLatestDecodedFrameC = Int32 Function(Pointer<Uint8> buffer, Int32 maxSize);
-typedef _GetLatestDecodedFrameDart = int Function(Pointer<Uint8> buffer, int maxSize);
-typedef _CleanupVideoDecoderC = Void Function();
-typedef _CleanupVideoDecoderDart = void Function();
-
-/// Decoder frame buffer (512KB)
-const int _maxDecoderBufferSize = 512 * 1024;
+/// Decoder frame buffer (2MB — enough for 640x480x4=1.2MB raw BGRA)
+const int _maxDecoderBufferSize = 2 * 1024 * 1024;
 Pointer<Uint8>? _decoderBuffer;
 Pointer<Uint8>? _decoderInputBuffer;
+int _decoderInputBufferSize = 0;
+
+/// Detect codec type from compressed NAL data (auto-detect like Android).
+/// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=unknown.
+int detectCodecType(Uint8List data) {
+  if (data.isEmpty) return 0;
+  final size = data.length;
+  // Reuse decoder input buffer for detection
+  if (_decoderInputBuffer == null || size > _decoderInputBufferSize) {
+    if (_decoderInputBuffer != null) calloc.free(_decoderInputBuffer!);
+    _decoderInputBufferSize = size > 512 * 1024 ? size : 512 * 1024;
+    _decoderInputBuffer = calloc<Uint8>(_decoderInputBufferSize);
+  }
+  _decoderInputBuffer!.asTypedList(size).setAll(0, data);
+  return _bindings.detectCodecType(_decoderInputBuffer!, size);
+}
 
 /// Initialize video decoder.
 /// [codecType]: 1=H.265/HEVC, 2=H.264/AVC.
+/// If already initialized with different codec, will auto-reinit (like Android).
 /// Returns 0 on success, -1 on failure.
 int initVideoDecoder(int width, int height, int codecType) {
-  final fn = _dylib.lookupFunction<_InitVideoDecoderC, _InitVideoDecoderDart>('initVideoDecoder');
-  return fn(width, height, codecType);
+  return _bindings.initVideoDecoder(width, height, codecType);
 }
 
 /// Decode a compressed video frame.
@@ -275,33 +292,34 @@ int decodeVideoFrame(Uint8List compressedData) {
   final size = compressedData.length;
   if (size <= 0) return -1;
 
-  // Allocate/reuse input buffer
-  if (_decoderInputBuffer == null || size > _maxDecoderBufferSize) {
+  // Allocate/reuse input buffer (grow if needed)
+  if (_decoderInputBuffer == null || size > _decoderInputBufferSize) {
     if (_decoderInputBuffer != null) calloc.free(_decoderInputBuffer!);
-    _decoderInputBuffer = calloc<Uint8>(size > _maxDecoderBufferSize ? size : _maxDecoderBufferSize);
+    _decoderInputBufferSize = size > 512 * 1024 ? size : 512 * 1024;
+    _decoderInputBuffer = calloc<Uint8>(_decoderInputBufferSize);
   }
 
   // Copy data to native buffer
   _decoderInputBuffer!.asTypedList(size).setAll(0, compressedData);
 
-  final fn = _dylib.lookupFunction<_DecodeVideoFrameC, _DecodeVideoFrameDart>('decodeVideoFrame');
-  return fn(_decoderInputBuffer!, size);
+  return _bindings.decodeVideoFrame(_decoderInputBuffer!, size);
 }
 
-/// Get latest decoded frame as JPEG bytes.
-/// Returns null if no frame available.
+/// Get latest decoded frame as raw BGRA pixel bytes.
+/// Returns a VIEW into native memory (zero-copy, saves ~1.2MB copy per frame!).
+/// IMPORTANT: Data is only valid until the next call to this function!
+/// Safe because decodeImageFromPixels copies pixel data synchronously.
 Uint8List? getLatestDecodedFrame() {
   _decoderBuffer ??= calloc<Uint8>(_maxDecoderBufferSize);
-  final fn = _dylib.lookupFunction<_GetLatestDecodedFrameC, _GetLatestDecodedFrameDart>('getLatestDecodedFrame');
-  final size = fn(_decoderBuffer!, _maxDecoderBufferSize);
+  final size = _bindings.getLatestDecodedFrame(_decoderBuffer!, _maxDecoderBufferSize);
   if (size <= 0) return null;
-  return Uint8List.fromList(_decoderBuffer!.asTypedList(size));
+  // Zero-copy: return view into native buffer
+  return _decoderBuffer!.asTypedList(size);
 }
 
 /// Cleanup decoder and release resources.
 void cleanupVideoDecoder() {
-  final fn = _dylib.lookupFunction<_CleanupVideoDecoderC, _CleanupVideoDecoderDart>('cleanupVideoDecoder');
-  fn();
+  _bindings.cleanupVideoDecoder();
   if (_decoderBuffer != null) {
     calloc.free(_decoderBuffer!);
     _decoderBuffer = null;
@@ -309,6 +327,7 @@ void cleanupVideoDecoder() {
   if (_decoderInputBuffer != null) {
     calloc.free(_decoderInputBuffer!);
     _decoderInputBuffer = null;
+    _decoderInputBufferSize = 0;
   }
 }
 
@@ -318,8 +337,8 @@ void cleanupVideoDecoder() {
 
 /// Get path to native debug log file.
 String getLogFilePath() {
-  final ptr = _dylib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>('getLogFilePath')();
-  return ptr.toDartString();
+  final ptr = _bindings.getLogFilePath();
+  return ptr.cast<Utf8>().toDartString();
 }
 
 /// Read native debug log contents.
