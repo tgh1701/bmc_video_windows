@@ -32,6 +32,7 @@
 
 #ifdef BMC_VIDEO_DEBUG
 
+/*
 static char s_logFilePath[MAX_PATH] = {0};
 
 static void init_log_file(void) {
@@ -74,12 +75,12 @@ static void log_to_file(const char* msg) {
         fclose(f);
     }
 }
+*/
 
 #define LOG(fmt, ...) { \
     char buf[512]; \
     sprintf_s(buf, sizeof(buf), "[bmc_video_windows] " fmt, __VA_ARGS__); \
     OutputDebugStringA(buf); \
-    log_to_file(buf); \
 }
 
 #else
