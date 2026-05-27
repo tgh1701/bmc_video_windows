@@ -115,6 +115,12 @@ int isH265KeyFrame(void);
 FFI_PLUGIN_EXPORT
 int getH265CodecType(void);
 
+/// Probe which video codec encoder is supported WITHOUT starting camera/encoder.
+/// Just enumerates MFT encoders to check availability.
+/// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=none.
+FFI_PLUGIN_EXPORT
+int probeVideoCodecSupport(void);
+
 /// Force the next frame to be encoded as a keyframe.
 FFI_PLUGIN_EXPORT
 void forceH265KeyFrame(void);
