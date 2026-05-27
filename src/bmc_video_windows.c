@@ -599,6 +599,7 @@ int getCameraResolutionCount(int deviceIndex) {
 
     // Enumerate all native media types
     int resCount = 0;
+    int totalTypes = 0;
     for (DWORD typeIndex = 0; typeIndex < 200; typeIndex++) {
         IMFMediaType* pType = NULL;
         hr = pReader->lpVtbl->GetNativeMediaType(pReader,
@@ -616,10 +617,15 @@ int getCameraResolutionCount(int deviceIndex) {
         int fpsDen = (int)(frameRate & 0xFFFFFFFF);
         int fps = (fpsDen > 0) ? (fpsNum / fpsDen) : 0;
 
+        // Get subtype for debug
+        GUID subtype = {0};
+        pType->lpVtbl->GetGUID(pType, &MY_MF_MT_SUBTYPE, &subtype);
+
         pType->lpVtbl->Release(pType);
+        totalTypes++;
 
         if (w <= 0 || h <= 0) continue;
-        if (fps < 15) continue;  // Skip impractical low frame rates
+        if (fps < 5) continue;  // Skip very low frame rates but allow 5-14fps
 
         // De-duplicate by resolution (w,h) — keep highest fps
         int found = 0;
