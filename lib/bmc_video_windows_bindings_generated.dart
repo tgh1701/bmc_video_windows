@@ -189,6 +189,17 @@ class BmcVideoWindowsBindings {
           'getH265CodecType');
   int _getH265CodecType() => _getH265CodecTypePtr();
 
+  /// Probe which video codec is supported WITHOUT starting encoder.
+  /// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=none.
+  int probeVideoCodecSupport() {
+    return _probeVideoCodecSupport();
+  }
+
+  late final _probeVideoCodecSupportPtr =
+      _dylib.lookupFunction<ffi.Int32 Function(), int Function()>(
+          'probeVideoCodecSupport');
+  int _probeVideoCodecSupport() => _probeVideoCodecSupportPtr();
+
   /// Force the next frame to be encoded as a keyframe.
   void forceH265KeyFrame() {
     _forceH265KeyFrame();

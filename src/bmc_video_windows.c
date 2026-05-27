@@ -1038,6 +1038,47 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
     return -1;
 }
 
+/// Probe which video codec is supported WITHOUT starting encoder.
+/// Returns: 1=H.265, 2=H.264, 0=none
+FFI_PLUGIN_EXPORT
+int probeVideoCodecSupport(void) {
+    HRESULT hr;
+    IMFActivate** ppActivate = NULL;
+    UINT32 count = 0;
+
+    const DWORD enumFlags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                            MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_HARDWARE |
+                            MFT_ENUM_FLAG_SORTANDFILTER;
+
+    // Check H.265 first
+    MFT_REGISTER_TYPE_INFO hevcInfo = {0};
+    memcpy(&hevcInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
+    memcpy(&hevcInfo.guidSubtype, &MY_MFVideoFormat_HEVC, sizeof(GUID));
+    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &hevcInfo, &ppActivate, &count);
+    if (SUCCEEDED(hr) && count > 0) {
+        for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+        CoTaskMemFree(ppActivate);
+        return 1; // H.265 supported
+    }
+    if (ppActivate) CoTaskMemFree(ppActivate);
+
+    // Check H.264
+    ppActivate = NULL;
+    count = 0;
+    MFT_REGISTER_TYPE_INFO h264Info = {0};
+    memcpy(&h264Info.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
+    memcpy(&h264Info.guidSubtype, &MY_MFVideoFormat_H264, sizeof(GUID));
+    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &h264Info, &ppActivate, &count);
+    if (SUCCEEDED(hr) && count > 0) {
+        for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+        CoTaskMemFree(ppActivate);
+        return 2; // H.264 supported
+    }
+    if (ppActivate) CoTaskMemFree(ppActivate);
+
+    return 0; // No encoder
+}
+
 /// Encode one raw frame via MFT. Outputs to state->h265Buffer.
 static int encode_video_frame(CaptureState* state, uint8_t* rawData, DWORD rawSize, int width, int height) {
     if (!state->pEncoder || !state->h265Active) return -1;

@@ -244,6 +244,10 @@ bool isH265KeyFrame() => _bindings.isH265KeyFrame() != 0;
 /// Get active video codec type: 0=none, 1=H.265/HEVC, 2=H.264/AVC.
 int getH265CodecType() => _bindings.getH265CodecType();
 
+/// Probe which video codec encoder is supported WITHOUT starting camera/encoder.
+/// Returns: 1=H.265/HEVC, 2=H.264/AVC, 0=none.
+int probeVideoCodecSupport() => _bindings.probeVideoCodecSupport();
+
 /// Force the next frame to be encoded as a keyframe.
 void forceH265KeyFrame() => _bindings.forceH265KeyFrame();
 
