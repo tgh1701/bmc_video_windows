@@ -2088,12 +2088,7 @@ int getFrameHeight(void) {
 
 FFI_PLUGIN_EXPORT
 const char* getLogFilePath(void) {
-#ifdef BMC_VIDEO_DEBUG
-    init_log_file();
-    return s_logFilePath;
-#else
     return "";
-#endif
 }
 
 // ============================================================================

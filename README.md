@@ -88,9 +88,36 @@ bmc_video.disposeFrameBuffer();
 | Hàm | Mô tả | Return |
 |-----|--------|--------|
 | `getLatestJpegFrame()` | Lấy frame JPEG mới nhất | `Uint8List?` |
+| `getLatestRawFrame()` | Lấy frame raw BGRA mới nhất (không nén) | `Uint8List?` |
 | `getFrameWidth()` | Width thực tế | `int` |
 | `getFrameHeight()` | Height thực tế | `int` |
-| `disposeFrameBuffer()` | Giải phóng native buffer | `void` |
+| `disposeFrameBuffer()` | Giải phóng toàn bộ native buffer (cả local và remote) | `void` |
+
+### H.265/H.264 Video Encoder
+
+Các hàm hỗ trợ nén frame hình từ camera sang luồng H.265 hoặc H.264 bằng phần cứng (Media Foundation) để gửi qua UDP.
+
+| Hàm | Mô tả | Return |
+|-----|--------|--------|
+| `probeVideoCodecSupport()` | Kiểm tra phần cứng hỗ trợ nén Codec nào mà không cần mở camera (`1 = H265, 2 = H264, 0 = none`) | `int` |
+| `getLatestH265Frame()` | Lấy frame đã được nén dạng H.265/H.264 mới nhất | `Uint8List?` |
+| `isH265KeyFrame()` | Kiểm tra xem frame nén mới nhất có phải Key Frame (I-frame) không | `bool` |
+| `getH265CodecType()` | Lấy loại codec đang hoạt động (`1 = H265, 2 = H264, 0 = none`) | `int` |
+| `forceH265KeyFrame()` | Yêu cầu encoder bắt buộc sinh ra I-frame ở frame tiếp theo (khi mất gói UDP) | `void` |
+| `setVideoQuality(quality)` | Cấu hình chất lượng mã hóa từ `10 - 100` | `void` |
+| `getVideoQuality()` | Lấy chất lượng mã hóa hiện tại | `int` |
+
+### H.265/H.264 Video Decoder
+
+Các hàm hỗ trợ giải mã luồng video nén nhận được từ phía đối phương (Android/Windows khác) thành raw BGRA để hiển thị trực tiếp lên Flutter UI.
+
+| Hàm | Mô tả | Return |
+|-----|--------|--------|
+| `detectCodecType(data)` | Tự động phân tích NAL headers để nhận diện loại Codec (`1 = H265, 2 = H264, 0 = unknown`) | `int` |
+| `initVideoDecoder(width, height, codecType)` | Khởi tạo hoặc thay đổi codec phần cứng giải mã | `int` (`0 = OK`, `-1 = fail`) |
+| `decodeVideoFrame(compressedData)` | Nạp dữ liệu nén UDP nhận được để đưa vào decoder giải mã | `int` (`1 = OK`, `0 = need more`, `-1 = error`) |
+| `getLatestDecodedFrame()` | Lấy raw BGRA pixel bytes đã được giải mã thành công | `Uint8List?` |
+| `cleanupVideoDecoder()` | Giải phóng bộ nhớ và tài nguyên của decoder | `void` |
 
 ### BmcVideoDevice
 
