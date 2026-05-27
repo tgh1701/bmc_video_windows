@@ -1044,45 +1044,95 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
     return -1;
 }
 
-/// Probe which video codec is supported WITHOUT starting encoder.
+/// Probe which video codec is supported by actually trying to create+configure encoder.
 /// Returns: 1=H.265, 2=H.264, 0=none
 FFI_PLUGIN_EXPORT
 int probeVideoCodecSupport(void) {
     HRESULT hr;
-    IMFActivate** ppActivate = NULL;
-    UINT32 count = 0;
 
     const DWORD enumFlags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
                             MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_HARDWARE |
                             MFT_ENUM_FLAG_SORTANDFILTER;
 
-    // Check H.265 first
-    MFT_REGISTER_TYPE_INFO hevcInfo = {0};
-    memcpy(&hevcInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
-    memcpy(&hevcInfo.guidSubtype, &MY_MFVideoFormat_HEVC, sizeof(GUID));
-    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &hevcInfo, &ppActivate, &count);
-    if (SUCCEEDED(hr) && count > 0) {
+    struct { const GUID* subtype; int type; const char* name; } codecs[] = {
+        { &MY_MFVideoFormat_HEVC, 1, "H.265" },
+        { &MY_MFVideoFormat_H264, 2, "H.264" },
+    };
+
+    struct { const GUID* subtype; } inputs[] = {
+        { &MY_MFVideoFormat_NV12 },
+        { &MY_MFVideoFormat_YUY2 },
+        { &MY_MFVideoFormat_RGB32 },
+    };
+
+    // Use 640x480 as test resolution (commonly supported)
+    const int testW = 640, testH = 480, testFps = 30;
+
+    for (int ci = 0; ci < 2; ci++) {
+        IMFActivate** ppActivate = NULL;
+        UINT32 count = 0;
+
+        MFT_REGISTER_TYPE_INFO outputInfo = {0};
+        memcpy(&outputInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
+        memcpy(&outputInfo.guidSubtype, codecs[ci].subtype, sizeof(GUID));
+
+        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &outputInfo, &ppActivate, &count);
+        if (FAILED(hr) || count == 0) {
+            if (ppActivate) CoTaskMemFree(ppActivate);
+            continue;
+        }
+
+        // Try each encoder instance
+        for (UINT32 ei = 0; ei < count; ei++) {
+            IMFTransform* pEncoder = NULL;
+            hr = ppActivate[ei]->lpVtbl->ActivateObject(ppActivate[ei], &MY_IID_IMFTransform, (void**)&pEncoder);
+            if (FAILED(hr) || !pEncoder) continue;
+
+            // Set output type
+            IMFMediaType* pOutputType = NULL;
+            MFCreateMediaType(&pOutputType);
+            pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+            pOutputType->lpVtbl->SetGUID(pOutputType, &MY_MF_MT_SUBTYPE, codecs[ci].subtype);
+            my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_SIZE, testW, testH);
+            my_SetAttributeSize((IMFAttributes*)pOutputType, &MY_MF_MT_FRAME_RATE, testFps, 1);
+            pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_AVG_BITRATE, 500000);
+            pOutputType->lpVtbl->SetUINT32(pOutputType, &MY_MF_MT_INTERLACE_MODE, 2);
+
+            hr = pEncoder->lpVtbl->SetOutputType(pEncoder, 0, pOutputType, 0);
+            pOutputType->lpVtbl->Release(pOutputType);
+            if (FAILED(hr)) { pEncoder->lpVtbl->Release(pEncoder); continue; }
+
+            // Try each input format
+            int inputOk = 0;
+            for (int ii = 0; ii < 3; ii++) {
+                IMFMediaType* pInputType = NULL;
+                MFCreateMediaType(&pInputType);
+                pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_MAJOR_TYPE, &MY_MFMediaType_Video);
+                pInputType->lpVtbl->SetGUID(pInputType, &MY_MF_MT_SUBTYPE, inputs[ii].subtype);
+                my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_SIZE, testW, testH);
+                my_SetAttributeSize((IMFAttributes*)pInputType, &MY_MF_MT_FRAME_RATE, testFps, 1);
+                pInputType->lpVtbl->SetUINT32(pInputType, &MY_MF_MT_INTERLACE_MODE, 2);
+
+                hr = pEncoder->lpVtbl->SetInputType(pEncoder, 0, pInputType, 0);
+                pInputType->lpVtbl->Release(pInputType);
+                if (SUCCEEDED(hr)) { inputOk = 1; break; }
+            }
+
+            pEncoder->lpVtbl->Release(pEncoder);
+
+            if (inputOk) {
+                // This codec actually works — cleanup and return
+                for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
+                CoTaskMemFree(ppActivate);
+                return codecs[ci].type;
+            }
+        }
+
         for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
         CoTaskMemFree(ppActivate);
-        return 1; // H.265 supported
     }
-    if (ppActivate) CoTaskMemFree(ppActivate);
 
-    // Check H.264
-    ppActivate = NULL;
-    count = 0;
-    MFT_REGISTER_TYPE_INFO h264Info = {0};
-    memcpy(&h264Info.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
-    memcpy(&h264Info.guidSubtype, &MY_MFVideoFormat_H264, sizeof(GUID));
-    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, NULL, &h264Info, &ppActivate, &count);
-    if (SUCCEEDED(hr) && count > 0) {
-        for (UINT32 i = 0; i < count; i++) ppActivate[i]->lpVtbl->Release(ppActivate[i]);
-        CoTaskMemFree(ppActivate);
-        return 2; // H.264 supported
-    }
-    if (ppActivate) CoTaskMemFree(ppActivate);
-
-    return 0; // No encoder
+    return 0; // No working encoder
 }
 
 /// Encode one raw frame via MFT. Outputs to state->h265Buffer.
