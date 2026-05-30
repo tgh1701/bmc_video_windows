@@ -892,11 +892,12 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
                             MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_HARDWARE |
                             MFT_ENUM_FLAG_SORTANDFILTER;
 
-    // Try codecs in order: H.265 then H.264
+    // Try codecs in order: H.264 first (default), H.265 commented out for now
     struct { const GUID* subtype; int type; const char* name; } codecs[] = {
-        { &MY_MFVideoFormat_HEVC, 1, "H.265" },
         { &MY_MFVideoFormat_H264, 2, "H.264" },
+        // { &MY_MFVideoFormat_HEVC, 1, "H.265" }, // TODO: uncomment khi cần dùng H265 lại
     };
+    int numCodecs = 1; // Only H.264 for now
 
     // Try input formats in order
     struct { const GUID* subtype; const char* name; } inputs[] = {
@@ -905,7 +906,7 @@ static int init_video_encoder(CaptureState* state, int width, int height, int fp
         { &MY_MFVideoFormat_RGB32, "RGB32" },
     };
 
-    for (int ci = 0; ci < 2; ci++) {
+    for (int ci = 0; ci < numCodecs; ci++) {
         MFT_REGISTER_TYPE_INFO outputInfo = {0};
         memcpy(&outputInfo.guidMajorType, &MY_MFMediaType_Video, sizeof(GUID));
         memcpy(&outputInfo.guidSubtype, codecs[ci].subtype, sizeof(GUID));
@@ -1056,9 +1057,10 @@ int probeVideoCodecSupport(void) {
                             MFT_ENUM_FLAG_SORTANDFILTER;
 
     struct { const GUID* subtype; int type; const char* name; } codecs[] = {
-        { &MY_MFVideoFormat_HEVC, 1, "H.265" },
         { &MY_MFVideoFormat_H264, 2, "H.264" },
+        // { &MY_MFVideoFormat_HEVC, 1, "H.265" }, // TODO: uncomment khi cần dùng H265 lại
     };
+    int numCodecs = 1; // Only H.264 for now
 
     struct { const GUID* subtype; } inputs[] = {
         { &MY_MFVideoFormat_NV12 },
@@ -1069,7 +1071,7 @@ int probeVideoCodecSupport(void) {
     // Use 640x480 as test resolution (commonly supported)
     const int testW = 640, testH = 480, testFps = 30;
 
-    for (int ci = 0; ci < 2; ci++) {
+    for (int ci = 0; ci < numCodecs; ci++) {
         IMFActivate** ppActivate = NULL;
         UINT32 count = 0;
 
