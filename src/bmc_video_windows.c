@@ -2154,7 +2154,7 @@ int getVideoQuality(void) {
 static int detectCodecFromNal(const uint8_t* data, int size) {
     if (!data || size < 5) return 0;
 
-    // Find first NAL start code
+    // Pass 1: Scan for unambiguous config NAL types (SPS/PPS/VPS)
     for (int i = 0; i < size - 4; i++) {
         int startCodeLen = 0;
         if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
@@ -2164,29 +2164,66 @@ static int detectCodecFromNal(const uint8_t* data, int size) {
         }
         if (startCodeLen == 0) continue;
 
-        int nalByte = data[i + startCodeLen];
-        if (nalByte & 0x80) continue; // forbidden_zero_bit set → invalid
+        int firstByte = data[i + startCodeLen];
+        if (firstByte & 0x80) continue; // forbidden_zero_bit set → invalid
 
-        // Try H.265: nalType = (byte >> 1) & 0x3F
-        int h265Type = (nalByte >> 1) & 0x3F;
-        // H.265 VPS=32, SPS=33, PPS=34 → type >= 32
-        if (h265Type >= 32 && h265Type <= 40) {
-            return 1; // H.265
-        }
+        int h264Type = firstByte & 0x1F;
 
-        // Try H.264: nalType = byte & 0x1F
-        int h264Type = nalByte & 0x1F;
-        // H.264 SPS=7, PPS=8, IDR=5, non-IDR=1
-        if (h264Type >= 1 && h264Type <= 12) {
+        // H264 SPS (type=7): bytes 0x27, 0x47, 0x67
+        if (h264Type == 7) return 2; // H.264
+        
+        // H264 PPS (type=8): bytes 0x28, 0x48, 0x68. 
+        // 0x48 and 0x68 are unique to H264.
+        if (h264Type == 8 && (firstByte == 0x48 || firstByte == 0x68)) {
             return 2; // H.264
         }
 
-        // H.265 IDR types: 19 (IDR_W_RADL), 20 (IDR_N_LP), TRAIL_R=1, etc
-        // If h265Type is in range 0-31 (slice types), check if h264Type makes no sense
-        if (h265Type >= 16 && h265Type <= 21) {
-            return 1; // H.265 IDR/CRA
+        // H265 SPS (type=33): bytes 0x42, 0x43
+        // H265 PPS (type=34): bytes 0x44, 0x45
+        int h265Type = (firstByte >> 1) & 0x3F;
+        if (h265Type == 33 || h265Type == 34) {
+            return 1; // H.265
         }
+
+        // H265 VPS (type=32): byte 0x40 is unique; 0x41 conflicts with H264 P-frame (0x41)
+        if (h265Type == 32 && firstByte == 0x40) {
+            return 1; // H.265
+        }
+
+        i += startCodeLen; // skip start code to speed up scan
     }
+
+    // Pass 2: Check for IDR types (less ambiguous but still reliable)
+    for (int i = 0; i < size - 4; i++) {
+        int startCodeLen = 0;
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1) {
+            startCodeLen = 3;
+        } else if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
+            startCodeLen = 4;
+        }
+        if (startCodeLen == 0) continue;
+
+        int firstByte = data[i + startCodeLen];
+        if (firstByte & 0x80) continue;
+
+        int h264Type = firstByte & 0x1F;
+
+        // H264 IDR (type=5): bytes 0x25, 0x45, 0x65
+        // 0x65 and 0x25 are unique to H264
+        if (h264Type == 5) return 2; // H.264
+
+        // H265 IDR types: 19 (IDR_W_RADL), 20 (IDR_N_LP)
+        int h265Type = (firstByte >> 1) & 0x3F;
+        if ((h265Type == 19 || h265Type == 20) && i + startCodeLen + 1 < size) {
+            // Extra validation: H265 temporal_id_plus1 in 2nd byte must be 1
+            int secondByte = data[i + startCodeLen + 1];
+            int temporalId = secondByte & 0x07;
+            if (temporalId == 1) return 1; // H.265
+        }
+
+        i += startCodeLen;
+    }
+
     return 0; // Unknown
 }
 
