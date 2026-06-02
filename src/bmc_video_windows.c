@@ -28,7 +28,7 @@
 
 // ============================================================================
 // Logging — ALWAYS enabled, writes to file + OutputDebugString
-// Log file: d:\BMC_Projects\bmc_video_windows\logs\native_YYYYMMDD_HHMMSS.log
+// Log file: d:\BMC_LOGS\native_YYYYMMDD_HHMMSS.log
 // ============================================================================
 
 static char s_logFilePath[MAX_PATH] = {0};
@@ -38,7 +38,7 @@ static void init_log_file(void) {
     if (s_logInitDone) return;
     s_logInitDone = 1;
 
-    const char* projectLogDir = "d:\\BMC_Projects\\bmc_video_windows\\logs";
+    const char* projectLogDir = "d:\\BMC_LOGS";
     CreateDirectoryA(projectLogDir, NULL);
 
     SYSTEMTIME st;
