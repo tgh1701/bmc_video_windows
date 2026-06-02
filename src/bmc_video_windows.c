@@ -1991,14 +1991,23 @@ void stopCameraCapture(void) {
     if (!g_capture.running) return;
 
     LOG("Stopping camera capture...\n", 0);
+
+    // Step 1: Signal thread to stop AND disable all FFI reads
+    // Setting these FIRST ensures getLatestH265Frame/getLatestFrame
+    // return 0 immediately (they check running/h265Active first)
+    g_capture.h265Active = 0;
+    g_capture.h265Ready = 0;
+    g_capture.frameReady = 0;
     g_capture.running = 0;
 
+    // Step 2: Wait for capture thread to fully exit
     if (g_capture.threadHandle) {
         WaitForSingleObject(g_capture.threadHandle, 5000);
         CloseHandle(g_capture.threadHandle);
         g_capture.threadHandle = NULL;
     }
 
+    // Step 3: Now safe to free resources (no readers, thread exited)
     if (g_capture.frameMutex) {
         CloseHandle(g_capture.frameMutex);
         g_capture.frameMutex = NULL;
@@ -2009,8 +2018,14 @@ void stopCameraCapture(void) {
         g_capture.rawBgraBuffer = NULL;
     }
 
+    // Cleanup encoder resources (previously leaked in some paths)
+    if (g_capture.h265Buffer) {
+        free(g_capture.h265Buffer);
+        g_capture.h265Buffer = NULL;
+    }
+    g_capture.h265Size = 0;
+
     g_capture.rawBgraSize = 0;
-    g_capture.frameReady = 0;
     LOG("Camera capture stopped\n", 0);
 }
 
@@ -2020,14 +2035,21 @@ void forceStopCameraCapture(void) {
     if (!g_capture.running) return;
 
     LOG("FORCE stopping camera capture...\n", 0);
+
+    // Step 1: Disable FFI reads FIRST (prevents crash in getLatestH265Frame)
+    g_capture.h265Active = 0;
+    g_capture.h265Ready = 0;
+    g_capture.frameReady = 0;
     g_capture.running = 0;
 
+    // Step 2: Wait for capture thread
     if (g_capture.threadHandle) {
         WaitForSingleObject(g_capture.threadHandle, 5000);
         CloseHandle(g_capture.threadHandle);
         g_capture.threadHandle = NULL;
     }
 
+    // Step 3: Free resources
     if (g_capture.frameMutex) {
         CloseHandle(g_capture.frameMutex);
         g_capture.frameMutex = NULL;
@@ -2038,8 +2060,13 @@ void forceStopCameraCapture(void) {
         g_capture.rawBgraBuffer = NULL;
     }
 
+    if (g_capture.h265Buffer) {
+        free(g_capture.h265Buffer);
+        g_capture.h265Buffer = NULL;
+    }
+    g_capture.h265Size = 0;
+
     g_capture.rawBgraSize = 0;
-    g_capture.frameReady = 0;
     LOG("Camera capture force-stopped\n", 0);
 }
 
@@ -2099,10 +2126,18 @@ const char* getLogFilePath(void) {
 
 FFI_PLUGIN_EXPORT
 int getLatestH265Frame(uint8_t* buffer, int bufferSize) {
-    if (!g_capture.h265Active || !g_capture.h265Ready) return 0;
+    if (!g_capture.running || !g_capture.h265Active || !g_capture.h265Ready) return 0;
+    if (!buffer || bufferSize <= 0) return 0;
+
+    // Guard against race with stopCapture freeing the mutex
+    if (!g_capture.frameMutex || !g_capture.h265Buffer) {
+        return 0;
+    }
 
     int copied = 0;
-    WaitForSingleObject(g_capture.frameMutex, 100);
+    DWORD waitResult = WaitForSingleObject(g_capture.frameMutex, 100);
+    if (waitResult != WAIT_OBJECT_0) return 0;
+
     if (g_capture.h265Ready && g_capture.h265Buffer && g_capture.h265Size > 0) {
         int copyLen = g_capture.h265Size;
         if (copyLen > bufferSize) copyLen = bufferSize;
