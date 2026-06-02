@@ -27,39 +27,43 @@
 #pragma comment(lib, "shlwapi.lib")
 
 // ============================================================================
-// Logging — disabled by default. Define BMC_VIDEO_DEBUG to enable.
+// Logging — ALWAYS enabled, writes to file + OutputDebugString
+// Log file: d:\BMC_Projects\bmc_video_windows\logs\native_YYYYMMDD_HHMMSS.log
 // ============================================================================
 
-#ifdef BMC_VIDEO_DEBUG
-
-/*
 static char s_logFilePath[MAX_PATH] = {0};
+static int s_logInitDone = 0;
 
 static void init_log_file(void) {
-    if (s_logFilePath[0] == '\0') {
-        const char* projectLogDir = "d:\\BMC_Projects\\bmc_video_windows\\logs";
-        CreateDirectoryA(projectLogDir, NULL);
+    if (s_logInitDone) return;
+    s_logInitDone = 1;
 
-        SYSTEMTIME st;
-        GetLocalTime(&st);
+    const char* projectLogDir = "d:\\BMC_Projects\\bmc_video_windows\\logs";
+    CreateDirectoryA(projectLogDir, NULL);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    sprintf_s(s_logFilePath, MAX_PATH,
+        "%s\\native_%04d%02d%02d_%02d%02d%02d.log",
+        projectLogDir,
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond);
+
+    // Test write
+    FILE* test = fopen(s_logFilePath, "a");
+    if (test) {
+        fprintf(test, "=== BMC_VIDEO_WINDOWS NATIVE LOG STARTED ===\n");
+        fflush(test);
+        fclose(test);
+    } else {
+        // Fallback to temp dir
+        char tempDir[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempDir);
         sprintf_s(s_logFilePath, MAX_PATH,
-            "%s\\native_%04d%02d%02d_%02d%02d%02d.log",
-            projectLogDir,
+            "%sbmc_video_native_%04d%02d%02d_%02d%02d%02d.log",
+            tempDir,
             st.wYear, st.wMonth, st.wDay,
             st.wHour, st.wMinute, st.wSecond);
-
-        FILE* test = fopen(s_logFilePath, "a");
-        if (test) {
-            fclose(test);
-        } else {
-            char tempDir[MAX_PATH];
-            GetTempPathA(MAX_PATH, tempDir);
-            sprintf_s(s_logFilePath, MAX_PATH,
-                "%sbmc_video_native_%04d%02d%02d_%02d%02d%02d.log",
-                tempDir,
-                st.wYear, st.wMonth, st.wDay,
-                st.wHour, st.wMinute, st.wSecond);
-        }
     }
 }
 
@@ -75,18 +79,13 @@ static void log_to_file(const char* msg) {
         fclose(f);
     }
 }
-*/
 
 #define LOG(fmt, ...) { \
     char buf[512]; \
     sprintf_s(buf, sizeof(buf), "[bmc_video_windows] " fmt, __VA_ARGS__); \
     OutputDebugStringA(buf); \
+    log_to_file(buf + 21); \
 }
-
-#else
-// Release: LOG is a no-op
-#define LOG(fmt, ...) ((void)0)
-#endif
 
 // ============================================================================
 // GUIDs (manually defined to avoid linker issues with Flutter's build system)
@@ -2117,7 +2116,8 @@ int getFrameHeight(void) {
 
 FFI_PLUGIN_EXPORT
 const char* getLogFilePath(void) {
-    return "";
+    init_log_file();
+    return s_logFilePath;
 }
 
 // ============================================================================
