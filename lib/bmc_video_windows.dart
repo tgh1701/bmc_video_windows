@@ -144,6 +144,21 @@ int startCapture({
   return _bindings.startCameraCapture(deviceIndex, width, height, fps, jpegQuality);
 }
 
+/// Set camera flip (mirror) settings.
+/// [flipH]: 1 = flip horizontal, 0 = normal.
+/// [flipV]: 1 = flip vertical, 0 = normal.
+/// Can be called before or during capture.
+void setCameraFlip({bool flipH = false, bool flipV = false}) {
+  try {
+    final nativeSetFlip = _dylib.lookupFunction<
+        Void Function(Int32, Int32),
+        void Function(int, int)>('setCameraFlip');
+    nativeSetFlip(flipH ? 1 : 0, flipV ? 1 : 0);
+  } catch (_) {
+    // Function not available in older native builds
+  }
+}
+
 /// Stop camera capture and release resources.
 /// NOTE: This is BLOCKED for 3 seconds after start (race condition protection).
 /// Use forceStopCapture() when actually ending a call.

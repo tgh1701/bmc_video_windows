@@ -335,6 +335,10 @@ typedef struct CaptureState {
     // Device index
     int deviceIndex;
 
+    // Flip settings (0=off, 1=on)
+    int flipH;  // Horizontal flip (mirror)
+    int flipV;  // Vertical flip
+
     // H.265/H.264 encoder state
     IMFTransform* pEncoder;
     ICodecAPI* pCodecAPI;
@@ -1674,11 +1678,15 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                     // YUY2: [Y0 U0 Y1 V0] [Y2 U2 Y3 V2] ...
                                     // → NV12: Y plane + UV interleaved
                                     for (int row = 0; row < actualHeight; row++) {
-                                        const uint8_t* srcRow = pBits + row * actualWidth * 2;
+                                        // Apply flipV: if flipV, read from bottom row
+                                        int srcRowIdx = state->flipV ? (actualHeight - 1 - row) : row;
+                                        const uint8_t* srcRow = pBits + srcRowIdx * actualWidth * 2;
                                         uint8_t* yRow = yPlane + row * actualWidth;
                                         
                                         for (int col = 0; col < actualWidth; col += 2) {
-                                            int si = col * 2;
+                                            // Apply flipH: if flipH, read from right side
+                                            int srcCol = state->flipH ? (actualWidth - 2 - col) : col;
+                                            int si = srcCol * 2;
                                             yRow[col]     = srcRow[si];     // Y0
                                             yRow[col + 1] = srcRow[si + 2]; // Y1
                                             
@@ -1713,9 +1721,13 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                 for (int row = 0; row < actualHeight; row++) {
                                     // MF bottom-up: row 0 in memory = bottom of image
                                     // NV12 is top-down: row 0 = top
-                                    const uint8_t* srcRow = pBits + (actualHeight - 1 - row) * stride;
+                                    // Apply flipV: invert the vertical flip
+                                    int srcRowIdx = state->flipV ? row : (actualHeight - 1 - row);
+                                    const uint8_t* srcRow = pBits + srcRowIdx * stride;
                                     for (int col = 0; col < actualWidth; col++) {
-                                        int srcIdx = col * bpp;
+                                        // Apply flipH
+                                        int srcCol = state->flipH ? (actualWidth - 1 - col) : col;
+                                        int srcIdx = srcCol * bpp;
                                         uint8_t B = srcRow[srcIdx + 0];
                                         uint8_t G = srcRow[srcIdx + 1];
                                         uint8_t R = srcRow[srcIdx + 2];
@@ -1861,10 +1873,13 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                 // Flip vertical (bottom-up → top-down) + mirror horizontal (selfie)
                                 srcStride = rgbWidth * 3;
                                 for (int row = 0; row < rgbHeight; row++) {
-                                    const uint8_t* srcRow = rgbData + (rgbHeight - 1 - row) * srcStride;
+                                    // Flip vertical: bottom-up → top-down. flipV inverts this.
+                                    int srcRowIdx = state->flipV ? row : (rgbHeight - 1 - row);
+                                    const uint8_t* srcRow = rgbData + srcRowIdx * srcStride;
                                     uint8_t* dstRow = dst + row * rgbWidth * 4;
                                     for (int col = 0; col < rgbWidth; col++) {
-                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        // flipH: mirror horizontally
+                                        int srcCol = state->flipH ? (rgbWidth - 1 - col) : col;
                                         dstRow[col * 4 + 0] = srcRow[srcCol * 3 + 0]; // B
                                         dstRow[col * 4 + 1] = srcRow[srcCol * 3 + 1]; // G
                                         dstRow[col * 4 + 2] = srcRow[srcCol * 3 + 2]; // R
@@ -1875,10 +1890,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                 // RGB32 (BGRA) bottom-up → top-down + mirror horizontal
                                 srcStride = rgbWidth * 4;
                                 for (int row = 0; row < rgbHeight; row++) {
-                                    const uint8_t* srcRow = pBits + (rgbHeight - 1 - row) * srcStride;
+                                    int srcRowIdx = state->flipV ? row : (rgbHeight - 1 - row);
+                                    const uint8_t* srcRow = pBits + srcRowIdx * srcStride;
                                     uint8_t* dstRow = dst + row * srcStride;
                                     for (int col = 0; col < rgbWidth; col++) {
-                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        int srcCol = state->flipH ? (rgbWidth - 1 - col) : col;
                                         memcpy(dstRow + col * 4, srcRow + srcCol * 4, 4);
                                     }
                                 }
@@ -1886,10 +1902,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                 // RGB24 (BGR) bottom-up → BGRA top-down + mirror horizontal
                                 srcStride = ((rgbWidth * 3 + 3) & ~3);
                                 for (int row = 0; row < rgbHeight; row++) {
-                                    const uint8_t* srcRow = pBits + (rgbHeight - 1 - row) * srcStride;
+                                    int srcRowIdx = state->flipV ? row : (rgbHeight - 1 - row);
+                                    const uint8_t* srcRow = pBits + srcRowIdx * srcStride;
                                     uint8_t* dstRow = dst + row * rgbWidth * 4;
                                     for (int col = 0; col < rgbWidth; col++) {
-                                        int srcCol = rgbWidth - 1 - col; // mirror
+                                        int srcCol = state->flipH ? (rgbWidth - 1 - col) : col;
                                         dstRow[col * 4 + 0] = srcRow[srcCol * 3 + 0]; // B
                                         dstRow[col * 4 + 1] = srcRow[srcCol * 3 + 1]; // G
                                         dstRow[col * 4 + 2] = srcRow[srcCol * 3 + 2]; // R
@@ -1992,6 +2009,13 @@ int startCameraCapture(int deviceIndex, int width, int height, int fps, int jpeg
     LOG("startCameraCapture: device=%d, %dx%d@%dfps, quality=%d\n",
         deviceIndex, width, height, fps, jpegQuality);
     return 0;
+}
+
+FFI_PLUGIN_EXPORT
+void setCameraFlip(int flipH, int flipV) {
+    g_capture.flipH = flipH;
+    g_capture.flipV = flipV;
+    LOG("setCameraFlip: flipH=%d, flipV=%d\n", flipH, flipV);
 }
 
 FFI_PLUGIN_EXPORT
