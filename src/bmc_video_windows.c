@@ -1717,113 +1717,6 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                 DWORD maxLen = 0, curLen = 0;
                 hr = pBuffer->lpVtbl->Lock(pBuffer, &pBits, &maxLen, &curLen);
                 if (SUCCEEDED(hr) && pBits && curLen > 0) {
-                    // === H.265/H.264 encode ===
-                    // FIX BUG #3: Encode video in BOTH native format AND RGB output modes
-                    // NOTE: Keyframe forcing removed — ICodecAPI is ignored by hardware,
-                    // and FLUSH+RESTART reduces quality. Encoder produces keyframes naturally.
-                    if (state->h265Active) {
-                        if (useNativeFormat) {
-                            // Check if encoder input format matches camera format
-                            if (IsEqualGUID(&state->h265InputSubtype, &nativeSubtype)) {
-                                // Same format — copy to temp buffer and apply flip before encoding
-                                if (state->flipH || state->flipV) {
-                                    uint8_t* tempBuf = (uint8_t*)malloc(curLen);
-                                    if (tempBuf) {
-                                        memcpy(tempBuf, pBits, curLen);
-                                        flip_nv12_buffer(tempBuf, actualWidth, actualHeight, state->flipH, state->flipV);
-                                        encode_video_frame(state, tempBuf, curLen, actualWidth, actualHeight);
-                                        free(tempBuf);
-                                    }
-                                } else {
-                                    encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
-                                }
-                            } else {
-                                // Need conversion: camera=YUY2, encoder=NV12 (most common case)
-                                int nv12Size = actualWidth * actualHeight * 3 / 2;
-                                uint8_t* nv12Buf = (uint8_t*)malloc(nv12Size);
-                                if (nv12Buf) {
-                                    uint8_t* yPlane = nv12Buf;
-                                    uint8_t* uvPlane = nv12Buf + actualWidth * actualHeight;
-                                    
-                                    // YUY2: [Y0 U0 Y1 V0] [Y2 U2 Y3 V2] ...
-                                    // → NV12: Y plane + UV interleaved
-                                    for (int row = 0; row < actualHeight; row++) {
-                                        const uint8_t* srcRow = pBits + row * actualWidth * 2;
-                                        uint8_t* yRow = yPlane + row * actualWidth;
-                                        
-                                        for (int col = 0; col < actualWidth; col += 2) {
-                                            int si = col * 2;
-                                            yRow[col]     = srcRow[si];     // Y0
-                                            yRow[col + 1] = srcRow[si + 2]; // Y1
-                                            
-                                            // UV: subsample vertically (every other row)
-                                            if ((row & 1) == 0) {
-                                                int uvIdx = (row / 2) * actualWidth + col;
-                                                uvPlane[uvIdx]     = srcRow[si + 1]; // U
-                                                uvPlane[uvIdx + 1] = srcRow[si + 3]; // V
-                                            }
-                                        }
-                                    }
-                                    // Apply flip AFTER conversion (clean, no pixel format issues)
-                                    flip_nv12_buffer(nv12Buf, actualWidth, actualHeight, state->flipH, state->flipV);
-                                    encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
-                                    free(nv12Buf);
-                                    if (frameCount == 0) {
-                                        LOG("capture_thread: YUY2->NV12 conversion for encoder\n", 0);
-                                    }
-                                }
-                            }
-                        } else {
-                            // RGB output — convert to NV12 first, then encode
-                            // RGB32: 4 bytes/pixel, RGB24: 3 bytes/pixel
-                            int bpp = (curLen >= (DWORD)(actualWidth * actualHeight * 4)) ? 4 : 3;
-                            int nv12Size = actualWidth * actualHeight * 3 / 2;
-                            uint8_t* nv12Buf = (uint8_t*)malloc(nv12Size);
-                            if (nv12Buf) {
-                                // MF RGB is bottom-up, so row 0 in buffer = bottom of image
-                                // NV12: Y plane (w*h) + UV interleaved plane (w*h/2)
-                                uint8_t* yPlane = nv12Buf;
-                                uint8_t* uvPlane = nv12Buf + actualWidth * actualHeight;
-                                int stride = (bpp == 4) ? actualWidth * 4 : ((actualWidth * 3 + 3) & ~3);
-
-                                for (int row = 0; row < actualHeight; row++) {
-                                    // MF bottom-up: row 0 in memory = bottom of image
-                                    // NV12 is top-down: row 0 = top
-                                    const uint8_t* srcRow = pBits + (actualHeight - 1 - row) * stride;
-                                    for (int col = 0; col < actualWidth; col++) {
-                                        int srcIdx = col * bpp;
-                                        uint8_t B = srcRow[srcIdx + 0];
-                                        uint8_t G = srcRow[srcIdx + 1];
-                                        uint8_t R = srcRow[srcIdx + 2];
-
-                                        // RGB → Y
-                                        int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
-                                        if (Y < 16) Y = 16; if (Y > 235) Y = 235;
-                                        yPlane[row * actualWidth + col] = (uint8_t)Y;
-
-                                        // UV: subsample 2x2
-                                        if ((row & 1) == 0 && (col & 1) == 0) {
-                                            int U = ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
-                                            int V = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
-                                            if (U < 0) U = 0; if (U > 255) U = 255;
-                                            if (V < 0) V = 0; if (V > 255) V = 255;
-                                            int uvRow = row / 2;
-                                            int uvIdx = uvRow * actualWidth + (col & ~1);
-                                            uvPlane[uvIdx] = (uint8_t)U;
-                                            uvPlane[uvIdx + 1] = (uint8_t)V;
-                                        }
-                                    }
-                                }
-                                // Apply flip AFTER conversion
-                                flip_nv12_buffer(nv12Buf, actualWidth, actualHeight, state->flipH, state->flipV);
-                                encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
-                                free(nv12Buf);
-                                if (frameCount == 0) {
-                                    LOG("capture_thread: RGB%d->NV12 conversion for encoder (curLen=%u)\n", bpp*8, curLen);
-                                }
-                            }
-                        }
-                    }
 
                     BYTE* rgbData = pBits;
                     int rgbWidth = actualWidth;
@@ -1997,6 +1890,50 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                         }
                         
                         ReleaseMutex(state->frameMutex);
+                    }
+
+                    // === H.264 encode from rawBgraBuffer (same data as preview → guaranteed match) ===
+                    // Convert top-down BGRA → NV12, then encode
+                    if (state->h265Active && state->rawBgraBuffer && state->rawBgraSize > 0) {
+                        int encW = state->bgraWidth;
+                        int encH = state->bgraHeight;
+                        int nv12Size = encW * encH * 3 / 2;
+                        uint8_t* nv12Buf = (uint8_t*)malloc(nv12Size);
+                        if (nv12Buf) {
+                            uint8_t* yPlane = nv12Buf;
+                            uint8_t* uvPlane = nv12Buf + encW * encH;
+                            const uint8_t* bgra = state->rawBgraBuffer;
+                            
+                            // BGRA top-down → NV12 top-down (simple, same orientation)
+                            for (int row = 0; row < encH; row++) {
+                                for (int col = 0; col < encW; col++) {
+                                    int idx = (row * encW + col) * 4;
+                                    uint8_t B = bgra[idx + 0];
+                                    uint8_t G = bgra[idx + 1];
+                                    uint8_t R = bgra[idx + 2];
+                                    
+                                    int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+                                    if (Y < 16) Y = 16; if (Y > 235) Y = 235;
+                                    yPlane[row * encW + col] = (uint8_t)Y;
+                                    
+                                    if ((row & 1) == 0 && (col & 1) == 0) {
+                                        int U = ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
+                                        int V = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
+                                        if (U < 0) U = 0; if (U > 255) U = 255;
+                                        if (V < 0) V = 0; if (V > 255) V = 255;
+                                        int uvIdx = (row / 2) * encW + (col & ~1);
+                                        uvPlane[uvIdx] = (uint8_t)U;
+                                        uvPlane[uvIdx + 1] = (uint8_t)V;
+                                    }
+                                }
+                            }
+                            encode_video_frame(state, nv12Buf, nv12Size, encW, encH);
+                            free(nv12Buf);
+                            if (frameCount == 1) {
+                                LOG("capture_thread: encoding from rawBgraBuffer %dx%d (flip=%d,%d)\n",
+                                    encW, encH, state->flipH, state->flipV);
+                            }
+                        }
                     }
 
                     pBuffer->lpVtbl->Unlock(pBuffer);
