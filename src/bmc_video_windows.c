@@ -38,14 +38,23 @@ static void init_log_file(void) {
     if (s_logInitDone) return;
     s_logInitDone = 1;
 
-    const char* projectLogDir = "d:\\BMC_LOGS";
-    CreateDirectoryA(projectLogDir, NULL);
+    // Use %LOCALAPPDATA%\BMC_LOGS — works on any Windows machine
+    char logDir[MAX_PATH];
+    const char* localAppData = getenv("LOCALAPPDATA");
+    if (localAppData && localAppData[0]) {
+        sprintf_s(logDir, MAX_PATH, "%s\\BMC_LOGS", localAppData);
+    } else {
+        // Fallback to temp dir
+        GetTempPathA(MAX_PATH, logDir);
+        strcat_s(logDir, MAX_PATH, "BMC_LOGS");
+    }
+    CreateDirectoryA(logDir, NULL);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
     sprintf_s(s_logFilePath, MAX_PATH,
         "%s\\native_%04d%02d%02d_%02d%02d%02d.log",
-        projectLogDir,
+        logDir,
         st.wYear, st.wMonth, st.wDay,
         st.wHour, st.wMinute, st.wSecond);
 
