@@ -1725,8 +1725,18 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                         if (useNativeFormat) {
                             // Check if encoder input format matches camera format
                             if (IsEqualGUID(&state->h265InputSubtype, &nativeSubtype)) {
-                                // Same format — feed directly
-                                encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
+                                // Same format — copy to temp buffer and apply flip before encoding
+                                if (state->flipH || state->flipV) {
+                                    uint8_t* tempBuf = (uint8_t*)malloc(curLen);
+                                    if (tempBuf) {
+                                        memcpy(tempBuf, pBits, curLen);
+                                        flip_nv12_buffer(tempBuf, actualWidth, actualHeight, state->flipH, state->flipV);
+                                        encode_video_frame(state, tempBuf, curLen, actualWidth, actualHeight);
+                                        free(tempBuf);
+                                    }
+                                } else {
+                                    encode_video_frame(state, pBits, curLen, actualWidth, actualHeight);
+                                }
                             } else {
                                 // Need conversion: camera=YUY2, encoder=NV12 (most common case)
                                 int nv12Size = actualWidth * actualHeight * 3 / 2;
@@ -2031,8 +2041,12 @@ int startCameraCapture(int deviceIndex, int width, int height, int fps, int jpeg
         return 0;  // FIX: Return success — don't kill working capture
     }
 
-    // Initialize state
+    // Initialize state — save flip values set by setCameraFlip() before memset clears them
+    int savedFlipH = g_capture.flipH;
+    int savedFlipV = g_capture.flipV;
     memset(&g_capture, 0, sizeof(CaptureState));
+    g_capture.flipH = savedFlipH;
+    g_capture.flipV = savedFlipV;
     g_capture.deviceIndex = deviceIndex;
     g_capture.width = width;
     g_capture.height = height;
