@@ -360,6 +360,66 @@ typedef struct CaptureState {
 static CaptureState g_capture = {0};
 
 // ============================================================================
+// NV12 flip helper — flip NV12 buffer in-place after conversion
+// Much cleaner than trying to flip during format conversion
+// ============================================================================
+static void flip_nv12_buffer(uint8_t* nv12, int width, int height, int flipH, int flipV) {
+    if (!flipH && !flipV) return;
+    
+    uint8_t* yPlane = nv12;
+    uint8_t* uvPlane = nv12 + width * height;
+    int uvHeight = height / 2;
+    
+    if (flipV) {
+        // Flip Y plane vertically (swap rows top↔bottom)
+        uint8_t* tempRow = (uint8_t*)malloc(width);
+        if (tempRow) {
+            for (int row = 0; row < height / 2; row++) {
+                uint8_t* topRow = yPlane + row * width;
+                uint8_t* botRow = yPlane + (height - 1 - row) * width;
+                memcpy(tempRow, topRow, width);
+                memcpy(topRow, botRow, width);
+                memcpy(botRow, tempRow, width);
+            }
+            // Flip UV plane vertically
+            for (int row = 0; row < uvHeight / 2; row++) {
+                uint8_t* topRow = uvPlane + row * width;
+                uint8_t* botRow = uvPlane + (uvHeight - 1 - row) * width;
+                memcpy(tempRow, topRow, width);
+                memcpy(topRow, botRow, width);
+                memcpy(botRow, tempRow, width);
+            }
+            free(tempRow);
+        }
+    }
+    
+    if (flipH) {
+        // Flip Y plane horizontally (swap pixels left↔right per row)
+        for (int row = 0; row < height; row++) {
+            uint8_t* rowPtr = yPlane + row * width;
+            for (int col = 0; col < width / 2; col++) {
+                uint8_t tmp = rowPtr[col];
+                rowPtr[col] = rowPtr[width - 1 - col];
+                rowPtr[width - 1 - col] = tmp;
+            }
+        }
+        // Flip UV plane horizontally (swap UV pairs)
+        for (int row = 0; row < uvHeight; row++) {
+            uint8_t* rowPtr = uvPlane + row * width;
+            for (int col = 0; col < width / 2; col += 2) {
+                int mirrorCol = width - 2 - col;
+                uint8_t tmpU = rowPtr[col];
+                uint8_t tmpV = rowPtr[col + 1];
+                rowPtr[col] = rowPtr[mirrorCol];
+                rowPtr[col + 1] = rowPtr[mirrorCol + 1];
+                rowPtr[mirrorCol] = tmpU;
+                rowPtr[mirrorCol + 1] = tmpV;
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Cached WIC Factory (reuse across frames for performance - FIX BUG #9)
 // ============================================================================
 
@@ -1678,15 +1738,11 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                     // YUY2: [Y0 U0 Y1 V0] [Y2 U2 Y3 V2] ...
                                     // → NV12: Y plane + UV interleaved
                                     for (int row = 0; row < actualHeight; row++) {
-                                        // Apply flipV: if flipV, read from bottom row
-                                        int srcRowIdx = state->flipV ? (actualHeight - 1 - row) : row;
-                                        const uint8_t* srcRow = pBits + srcRowIdx * actualWidth * 2;
+                                        const uint8_t* srcRow = pBits + row * actualWidth * 2;
                                         uint8_t* yRow = yPlane + row * actualWidth;
                                         
                                         for (int col = 0; col < actualWidth; col += 2) {
-                                            // Apply flipH: if flipH, read from right side
-                                            int srcCol = state->flipH ? (actualWidth - 2 - col) : col;
-                                            int si = srcCol * 2;
+                                            int si = col * 2;
                                             yRow[col]     = srcRow[si];     // Y0
                                             yRow[col + 1] = srcRow[si + 2]; // Y1
                                             
@@ -1698,6 +1754,8 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                             }
                                         }
                                     }
+                                    // Apply flip AFTER conversion (clean, no pixel format issues)
+                                    flip_nv12_buffer(nv12Buf, actualWidth, actualHeight, state->flipH, state->flipV);
                                     encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
                                     free(nv12Buf);
                                     if (frameCount == 0) {
@@ -1721,13 +1779,9 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                 for (int row = 0; row < actualHeight; row++) {
                                     // MF bottom-up: row 0 in memory = bottom of image
                                     // NV12 is top-down: row 0 = top
-                                    // Apply flipV: invert the vertical flip
-                                    int srcRowIdx = state->flipV ? row : (actualHeight - 1 - row);
-                                    const uint8_t* srcRow = pBits + srcRowIdx * stride;
+                                    const uint8_t* srcRow = pBits + (actualHeight - 1 - row) * stride;
                                     for (int col = 0; col < actualWidth; col++) {
-                                        // Apply flipH
-                                        int srcCol = state->flipH ? (actualWidth - 1 - col) : col;
-                                        int srcIdx = srcCol * bpp;
+                                        int srcIdx = col * bpp;
                                         uint8_t B = srcRow[srcIdx + 0];
                                         uint8_t G = srcRow[srcIdx + 1];
                                         uint8_t R = srcRow[srcIdx + 2];
@@ -1750,6 +1804,8 @@ static unsigned __stdcall camera_capture_thread(void* arg) {
                                         }
                                     }
                                 }
+                                // Apply flip AFTER conversion
+                                flip_nv12_buffer(nv12Buf, actualWidth, actualHeight, state->flipH, state->flipV);
                                 encode_video_frame(state, nv12Buf, nv12Size, actualWidth, actualHeight);
                                 free(nv12Buf);
                                 if (frameCount == 0) {
