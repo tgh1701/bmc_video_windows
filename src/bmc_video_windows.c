@@ -2532,7 +2532,7 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
             break; // No more output available — normal exit
         }
 
-        if (hr == ((HRESULT)0xC00D6D60L)) { // MF_E_TRANSFORM_STREAM_CHANGE
+        if (hr == ((HRESULT)0xC00D6D61L)) { // MF_E_TRANSFORM_STREAM_CHANGE
             // Output format changed — re-negotiate
             if (pOutputSample) pOutputSample->lpVtbl->Release(pOutputSample);
             if (pOutputBuffer) pOutputBuffer->lpVtbl->Release(pOutputBuffer);
@@ -2543,6 +2543,29 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize) {
             hr = pDecoder->lpVtbl->GetOutputAvailableType(pDecoder, 0, 0, &pNewOutputType);
             if (SUCCEEDED(hr)) {
                 pDecoder->lpVtbl->SetOutputType(pDecoder, 0, pNewOutputType, 0);
+
+                // Get the new resolution
+                UINT64 frameSize = 0;
+                HRESULT sizeHr = pNewOutputType->lpVtbl->GetUINT64(pNewOutputType, &MY_MF_MT_FRAME_SIZE, &frameSize);
+                if (SUCCEEDED(sizeHr)) {
+                    int newWidth = (int)(frameSize >> 32);
+                    int newHeight = (int)(frameSize & 0xFFFFFFFF);
+                    LOG("decodeVideoFrame: resolution changed %dx%d -> %dx%d\n", g_decoder.width, g_decoder.height, newWidth, newHeight);
+
+                    if (newWidth > 0 && newHeight > 0 && (newWidth != g_decoder.width || newHeight != g_decoder.height)) {
+                        g_decoder.width = newWidth;
+                        g_decoder.height = newHeight;
+
+                        // Reallocate outputBuffer safely under mutex
+                        WaitForSingleObject(g_decoder.mutex, INFINITE);
+                        if (g_decoder.outputBuffer) {
+                            free(g_decoder.outputBuffer);
+                        }
+                        g_decoder.outputBuffer = (uint8_t*)malloc(newWidth * newHeight * 4);
+                        ReleaseMutex(g_decoder.mutex);
+                    }
+                }
+
                 // Check if output is NV12 or RGB32
                 GUID subtype = {0};
                 pNewOutputType->lpVtbl->GetGUID(pNewOutputType, &MF_MT_SUBTYPE, &subtype);
@@ -2659,6 +2682,16 @@ int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize) {
     }
     ReleaseMutex(g_decoder.mutex);
     return copied;
+}
+
+FFI_PLUGIN_EXPORT
+int getDecoderWidth(void) {
+    return g_decoder.width;
+}
+
+FFI_PLUGIN_EXPORT
+int getDecoderHeight(void) {
+    return g_decoder.height;
 }
 
 /// Cleanup decoder

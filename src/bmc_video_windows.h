@@ -152,6 +152,12 @@ int decodeVideoFrame(const uint8_t* compressedData, int compressedSize);
 FFI_PLUGIN_EXPORT
 int getLatestDecodedFrame(uint8_t* outBuffer, int maxSize);
 
+FFI_PLUGIN_EXPORT
+int getDecoderWidth(void);
+
+FFI_PLUGIN_EXPORT
+int getDecoderHeight(void);
+
 /// Cleanup decoder and release resources.
 FFI_PLUGIN_EXPORT
 void cleanupVideoDecoder(void);

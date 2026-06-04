@@ -183,8 +183,8 @@ bool isCapturing() => _bindings.isCameraCapturing() != 0;
 // Frame Retrieval
 // ============================================================================
 
-/// Maximum raw BGRA frame buffer size (4 MB - supports up to 1024x1024 BGRA).
-const int _maxRawFrameBufferSize = 4 * 1024 * 1024;
+/// Maximum raw BGRA frame buffer size (16 MB - supports up to 4K BGRA).
+const int _maxRawFrameBufferSize = 16 * 1024 * 1024;
 
 /// Reusable native buffer to avoid repeated allocation.
 Pointer<Uint8>? _frameBuffer;
@@ -237,8 +237,8 @@ void disposeFrameBuffer() {
 // H.265/H.264 Video Encoder
 // ============================================================================
 
-/// H.265 frame buffer (512KB for compressed output)
-const int _maxH265BufferSize = 512 * 1024;
+/// H.265 frame buffer (2MB for compressed output)
+const int _maxH265BufferSize = 2 * 1024 * 1024;
 Pointer<Uint8>? _h265Buffer;
 
 /// Get the latest H.265/H.264 encoded frame.
@@ -276,8 +276,8 @@ int getVideoQuality() => _bindings.getVideoQuality();
 // H.265/H.264 Video Decoder (for remote video)
 // ============================================================================
 
-/// Decoder frame buffer (2MB — enough for 640x480x4=1.2MB raw BGRA)
-const int _maxDecoderBufferSize = 2 * 1024 * 1024;
+/// Decoder frame buffer (16MB — enough for 4K raw BGRA)
+const int _maxDecoderBufferSize = 16 * 1024 * 1024;
 Pointer<Uint8>? _decoderBuffer;
 Pointer<Uint8>? _decoderInputBuffer;
 int _decoderInputBufferSize = 0;
@@ -347,6 +347,30 @@ void cleanupVideoDecoder() {
     calloc.free(_decoderInputBuffer!);
     _decoderInputBuffer = null;
     _decoderInputBufferSize = 0;
+  }
+}
+
+/// Get the actual width of decoded frames from the remote stream.
+int getDecoderWidth() {
+  try {
+    final nativeGetDecoderWidth = _dylib.lookupFunction<
+        Int32 Function(),
+        int Function()>('getDecoderWidth');
+    return nativeGetDecoderWidth();
+  } catch (_) {
+    return 640; // Fallback
+  }
+}
+
+/// Get the actual height of decoded frames from the remote stream.
+int getDecoderHeight() {
+  try {
+    final nativeGetDecoderHeight = _dylib.lookupFunction<
+        Int32 Function(),
+        int Function()>('getDecoderHeight');
+    return nativeGetDecoderHeight();
+  } catch (_) {
+    return 480; // Fallback
   }
 }
 
